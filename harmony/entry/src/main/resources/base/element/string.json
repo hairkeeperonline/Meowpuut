@@ -1,0 +1,20 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "喵扑输入法"
+    },
+    {
+      "name": "app_name",
+      "value": "喵扑"
+    },
+    {
+      "name": "ime_label",
+      "value": "喵扑"
+    },
+    {
+      "name": "ime_desc",
+      "value": "喵扑输入法（注音/拼音/日语混合输入）"
+    }
+  ]
+}

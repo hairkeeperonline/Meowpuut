@@ -19,7 +19,9 @@ konnichiha,konnichiwa|こんにちは|9000
 konbanha,konbanwa|こんばんは|9000
 ohayou,ohayo|おはよう|8000
 oyasumi|おやすみ|8000
-sumimasen|すみません|9000
+sumimasen,sumimasai,simimasen,simimasai|すみません|9000
+sumimasen,sumimasai,simimasen,simimasai|私密马赛|8000
+sumimasen,sumimasai,simimasen,simimasai|私密馬賽|7000
 gomen|ごめん|8000
 onegai|お願い|8000
 hai|はい|8000

@@ -1,0 +1,380 @@
+/**
+ * 一次组字（对应 Android engine/Composer.kt）。拼音和注音走 Rust 核心，
+ * 日语（罗马字转假名）在这里处理。所有调用都在主线程。
+ */
+import { Candidate, CandidateKind, CoreCandidate, Edit, InputMode } from './Types';
+import { NativeEngine } from './NativeEngine';
+import { JapaneseWords } from './JapaneseWords';
+import { Romaji } from './Romaji';
+import { CandidateMerge } from './CandidateMerge';
+
+const FIRST_BATCH = 48;
+const TONES = ' 6347';
+const TONE_MARKS: Map<string, string> = new Map([
+  ['6', 'ˊ'], ['3', 'ˇ'], ['4', 'ˋ'], ['7', '˙'], [' ', 'ˉ'],
+]);
+
+export class Composer {
+  japaneseWords: JapaneseWords = JapaneseWords.EMPTY;
+
+  private _mode: InputMode = InputMode.ZHUYIN;
+  private _simplified: boolean = false;
+
+  private session: number = 0;
+  private maxInput: number = 64;
+  private raw: string = '';
+  private coreTotal: number = 0;
+  private coreFetched: number = 0;
+
+  private _candidates: Candidate[] = [];
+  private _highlighted: number = 0;
+  private _preedit: string = '';
+
+  get mode(): InputMode { return this._mode; }
+
+  get simplified(): boolean { return this._simplified; }
+  set simplified(value: boolean) {
+    if (this._simplified === value) return;
+    this._simplified = value;
+    if (this.session !== 0) {
+      NativeEngine.setSimplified(this.session, value);
+      if (this.raw.length > 0) this.rebuild();
+    }
+  }
+
+  get candidates(): Candidate[] { return this._candidates; }
+  get highlighted(): number { return this._highlighted; }
+  set highlighted(v: number) { this._highlighted = v; }
+  get preedit(): string { return this._preedit; }
+
+  get composing(): boolean { return this.raw.length > 0; }
+  /** 当前组合中的原始串（调试用）。 */
+  get rawPreview(): string { return this.raw; }
+  get input(): string { return this.raw; }
+  get moreAvailable(): boolean { return this.coreFetched < this.coreTotal; }
+
+  /** 日语不需要词库；中文要等引擎会话。 */
+  get ready(): boolean { return this._mode === InputMode.JAPANESE || this.session !== 0; }
+
+  attach(mode: InputMode, session: number): void {
+    this.session = 0;
+    this.clear();
+    this._mode = mode;
+    this.session = mode === InputMode.JAPANESE ? 0 : session;
+    if (this.session !== 0) {
+      this.maxInput = Math.max(8, NativeEngine.maxInputBytes());
+      NativeEngine.setSimplified(this.session, this._simplified);
+    }
+  }
+
+  detach(): void {
+    this.clear();
+    this.session = 0;
+  }
+
+  type(code: number): Edit {
+    const c = String.fromCharCode(code);
+    switch (this._mode) {
+      // 九键拼音（PINYIN9）T9 引擎暂未实现，降级到全键拼音输入路径（见 PARITY round 56）。
+      case InputMode.PINYIN:
+      case InputMode.PINYIN9: return this.typePinyin(c);
+      case InputMode.ZHUYIN: return this.typeZhuyin(c);
+      case InputMode.JAPANESE: return this.typeJapanese(c);
+      default: return { handled: false, commit: '' };
+    }
+  }
+
+  private typePinyin(c: string): Edit {
+    if (this.session === 0) return { handled: false, commit: '' };
+    const letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+    const separator = c === "'" && this.raw.length > 0 && !this.raw.endsWith("'");
+    if (!letter && !separator) return { handled: false, commit: '' };
+    let pending = '';
+    if (this.raw.length >= this.maxInput) {
+      pending = this.raw;
+      this.resetCore();
+      if (separator) return { handled: true, commit: pending };
+    }
+    if (!NativeEngine.key(this.session, c.toLowerCase().charCodeAt(0))) {
+      return { handled: pending.length > 0, commit: pending };
+    }
+    this.raw += c;
+    pending += NativeEngine.takeCommitted(this.session);
+    this.syncRaw();
+    this.rebuild();
+    return { handled: true, commit: pending };
+  }
+
+  private typeZhuyin(c: string): Edit {
+    if (this.session === 0) return { handled: false, commit: '' };
+    let pending = '';
+    if (this.raw.length >= this.maxInput) {
+      const tone = TONE_MARKS.get(c);
+      if (tone !== undefined) {
+        if (TONES.includes(this.raw.charAt(this.raw.length - 1))) return { handled: true, commit: '' };
+        const text = this.preedit + tone;
+        this.resetCore();
+        return { handled: true, commit: text };
+      }
+      pending = this.preedit;
+      this.resetCore();
+    }
+    if (!NativeEngine.key(this.session, c.charCodeAt(0))) {
+      return { handled: pending.length > 0, commit: pending };
+    }
+    this.raw += c;
+    pending += NativeEngine.takeCommitted(this.session);
+    this.syncRaw();
+    this.rebuild();
+    return { handled: true, commit: pending };
+  }
+
+  private typeJapanese(c: string): Edit {
+    const ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c === '-' || c === "'";
+    if (!ok) return { handled: false, commit: '' };
+    if (this.raw.length >= 80) return { handled: true, commit: '' };
+    this.raw += c;
+    this.rebuild();
+    return { handled: true, commit: '' };
+  }
+
+  space(): Edit {
+    if (this.raw.length === 0) return { handled: false, commit: '' };
+    switch (this._mode) {
+      case InputMode.ZHUYIN:
+        return TONES.includes(this.raw.charAt(this.raw.length - 1)) ? this.chooseHighlighted() : this.typeZhuyin(' ');
+      case InputMode.PINYIN:
+      case InputMode.PINYIN9:
+        return this.candidates.length > 0 ? this.chooseHighlighted() : { handled: true, commit: this.takeLiteral() + ' ' };
+      case InputMode.JAPANESE:
+        return this.chooseHighlighted();
+      default:
+        return { handled: false, commit: '' };
+    }
+  }
+
+  backspace(): Edit {
+    if (this.raw.length === 0) return { handled: false, commit: '' };
+    this.raw = this.raw.substring(0, this.raw.length - 1);
+    if (this._mode !== InputMode.JAPANESE && this.session !== 0) {
+      if (this.raw.length === 0) {
+        NativeEngine.clear(this.session);
+      } else {
+        NativeEngine.key(this.session, NativeEngine.KEY_BACKSPACE);
+        NativeEngine.takeCommitted(this.session);
+        if (NativeEngine.input(this.session) !== this.coreText(this.raw)) this.replay();
+      }
+    }
+    this.rebuild();
+    return { handled: true, commit: '' };
+  }
+
+  chooseHighlighted(): Edit {
+    const idx = Math.min(Math.max(0, this._highlighted), Math.max(0, this.candidates.length - 1));
+    return this.choose(idx);
+  }
+
+  choose(index: number): Edit {
+    const c = index >= 0 && index < this.candidates.length ? this.candidates[index] : null;
+    if (c === null) {
+      return this.raw.length === 0 ? { handled: false, commit: '' } : { handled: true, commit: this.takeLiteral() };
+    }
+    switch (c.kind) {
+      case CandidateKind.CHINESE: {
+        if (this.session === 0 || !NativeEngine.choose(this.session, c.coreIndex)) {
+          return { handled: false, commit: '' };
+        }
+        const text = NativeEngine.takeCommitted(this.session);
+        const rest = NativeEngine.input(this.session);
+        if (rest.length === 0) this.raw = ''; else this.keepSuffix(rest);
+        this.rebuild();
+        return { handled: true, commit: text };
+      }
+      case CandidateKind.MIXED_PREFIX: {
+        const consumed = Math.min(c.consumed, this.raw.length);
+        const rest = this.raw.substring(consumed);
+        this.resetCore();
+        this.raw = rest;
+        this.replay();
+        this.rebuild();
+        return { handled: true, commit: c.text };
+      }
+      default: {
+        this.resetCore();
+        return { handled: true, commit: c.text };
+      }
+    }
+  }
+
+  takeLiteral(): string {
+    const text = this._mode === InputMode.ZHUYIN ? this.preedit : this.raw;
+    this.resetCore();
+    return text;
+  }
+
+  clear(): void { this.resetCore(); }
+
+  loadMore(batch: number = 96): boolean {
+    if (this.session === 0 || this.coreFetched >= this.coreTotal) return false;
+    const more = this.fetchCore(this.coreFetched, batch);
+    const seen = new Set(this.candidates.map(c => c.text));
+    const added: Candidate[] = [];
+    for (const m of more) {
+      if (!seen.has(m.text)) {
+        seen.add(m.text);
+        added.push({ text: m.text, kind: CandidateKind.CHINESE, coreIndex: m.index, consumed: m.consumed });
+      }
+    }
+    this._candidates = this.candidates.concat(added);
+    return added.length > 0;
+  }
+
+  predictions(context: string, limit: number = 8): string[] {
+    if (this.session === 0 || this._mode === InputMode.JAPANESE || context.trim().length === 0) return [];
+    return NativeEngine.predict(this.session, context.slice(-8), limit).filter(t => t.length > 0);
+  }
+
+  private resetCore(): void {
+    this.raw = '';
+    if (this.session !== 0) {
+      NativeEngine.clear(this.session);
+      NativeEngine.takeCommitted(this.session);
+    }
+    this._candidates = [];
+    this._preedit = '';
+    this._highlighted = 0;
+    this.coreTotal = 0;
+    this.coreFetched = 0;
+  }
+
+  private coreText(text: string): string {
+    return (this._mode === InputMode.PINYIN || this._mode === InputMode.PINYIN9) ? text.toLowerCase() : text;
+  }
+
+  private replay(): void {
+    if (this.session === 0) return;
+    NativeEngine.clear(this.session);
+    for (const ch of this.raw) {
+      NativeEngine.key(this.session, this.coreText(ch).charCodeAt(0));
+    }
+    NativeEngine.takeCommitted(this.session);
+  }
+
+  private keepSuffix(rest: string): void {
+    const typed = this.raw;
+    let suffix: string;
+    if (rest.length <= typed.length && typed.slice(-rest.length).toLowerCase() === rest.toLowerCase()) {
+      suffix = typed.slice(-rest.length);
+    } else {
+      suffix = rest;
+    }
+    this.raw = suffix;
+  }
+
+  private syncRaw(): void {
+    const core = NativeEngine.input(this.session);
+    if (core !== this.coreText(this.raw)) this.keepSuffix(core);
+  }
+
+  private fetchCore(start: number, count: number): CoreCandidate[] {
+    const n = Math.min(count, this.coreTotal - start);
+    if (n <= 0) return [];
+    const texts = NativeEngine.candidates(this.session, start, n);
+    const details = NativeEngine.candidateDetails(this.session, start, n);
+    this.coreFetched = start + texts.length;
+    const out: CoreCandidate[] = [];
+    for (let i = 0; i < texts.length; i++) {
+      const consumed = details[i * 2] !== undefined ? details[i * 2] : 0;
+      const kind = details[i * 2 + 1] !== undefined ? details[i * 2 + 1] : 0;
+      out.push({ text: texts[i], index: start + i, consumed: consumed, exact: kind === NativeEngine.KIND_EXACT });
+    }
+    return out;
+  }
+
+  private rebuild(): void {
+    this._highlighted = 0;
+    if (this.raw.length === 0) {
+      this._candidates = [];
+      this._preedit = '';
+      this.coreTotal = 0;
+      this.coreFetched = 0;
+      return;
+    }
+    switch (this._mode) {
+      case InputMode.PINYIN:
+      case InputMode.PINYIN9: {
+        this._preedit = this.raw;
+        this.coreTotal = NativeEngine.candidateCount(this.session);
+        this.coreFetched = 0;
+        const chinese = this.fetchCore(0, FIRST_BATCH);
+        const lower = this.raw.toLowerCase();
+        const reading = lower.replace(/'/g, '');
+        // wordsLoose：先按标准罗马字精确查，不命中再按假名读音兜底
+        // （这样 simimasai / sumimasen 这类不同拼法都能出「すみません」）。
+        const japanese = this.japaneseWords.wordsLoose(reading, (s: string) => Romaji.reading(s));
+        const word = japanese.length > 0 ? japanese[0] : null;
+        // 同一读音在词表里可能挂多个词（「すみません」+ 中文音译「私密马赛」），
+        // 其余作为 moreJapanese 交给 CandidateMerge，与 Android 一样排到第一页之后。
+        const wordExtras: string[] = [];
+        for (let i = 1; i < japanese.length; i++) wordExtras.push(japanese[i]);
+        const whole = (word === null && reading.length >= 2)
+          ? (NativeEngine.mixedPinyin(this.session, lower, this._simplified) || null) : null;
+        let prefix: [string, number] | null = null;
+        if (reading.length >= 3) {
+          const p = NativeEngine.mixedPinyinPrefix(this.session, lower, this._simplified);
+          if (p !== null) prefix = [p[0], parseInt(p[1], 10) || 0];
+        }
+        this._candidates = CandidateMerge.pinyin(
+          lower, this.raw, chinese, word, whole, prefix,
+          Romaji.reading(reading), wordExtras);
+        break;
+      }
+      case InputMode.ZHUYIN: {
+        this._preedit = NativeEngine.preedit(this.session);
+        this.coreTotal = NativeEngine.candidateCount(this.session);
+        this.coreFetched = 0;
+        const core = this.fetchCore(0, FIRST_BATCH);
+        const seen = new Set<string>();
+        const out: Candidate[] = [];
+        for (const c of core) {
+          if (!seen.has(c.text)) {
+            seen.add(c.text);
+            out.push({ text: c.text, kind: CandidateKind.CHINESE, coreIndex: c.index, consumed: c.consumed });
+          }
+        }
+        this._candidates = out;
+        break;
+      }
+      case InputMode.JAPANESE: {
+        const reading = Romaji.reading(this.raw);
+        this._preedit = reading;
+        const katakana = Romaji.katakana(reading);
+        const list: Candidate[] = [];
+        for (const w of this.japaneseWords.wordsLoose(this.raw.toLowerCase(), (s: string) => Romaji.reading(s))) {
+          list.push({ text: w, kind: CandidateKind.JAPANESE_WORD, coreIndex: -1, consumed: this.raw.length });
+        }
+        list.push({ text: reading, kind: CandidateKind.KANA, coreIndex: -1, consumed: this.raw.length });
+        list.push({ text: katakana, kind: CandidateKind.KANA, coreIndex: -1, consumed: this.raw.length });
+        const typed = this.raw;
+        const allCaps = /[A-Za-z]/.test(typed) && typed === typed.toUpperCase();
+        if (allCaps) {
+          const filtered = list.filter(c => c.text !== katakana);
+          filtered.unshift({ text: katakana, kind: CandidateKind.KANA, coreIndex: -1, consumed: this.raw.length });
+          this._candidates = this.distinctBy(filtered);
+        } else {
+          this._candidates = this.distinctBy(list);
+        }
+        break;
+      }
+    }
+  }
+
+  private distinctBy(list: Candidate[]): Candidate[] {
+    const seen = new Set<string>();
+    const out: Candidate[] = [];
+    for (const c of list) {
+      if (!seen.has(c.text)) { seen.add(c.text); out.push(c); }
+    }
+    return out;
+  }
+}

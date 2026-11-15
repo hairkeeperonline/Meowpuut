@@ -1,0 +1,12 @@
+# 二进制 / 数据文件必须原样 checkout：这些数据源带 SHA-256 校验（SOURCE.json），
+# Windows 的 core.autocrlf=true 会把 LF 转成 CRLF 导致校验失败。
+DataSources/**/*.json -text
+DataSources/**/*.txt -text
+DataSources/**/*.tsv -text
+DataSources/**/LICENSE -text
+DataSources/**/LICENSE.* -text
+Resources/Lexicon/** -text
+*.bin -text
+*.png -text
+*.ttf -text
+*.otf -text

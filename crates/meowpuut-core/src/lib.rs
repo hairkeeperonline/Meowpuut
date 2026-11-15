@@ -41,6 +41,7 @@ pub mod lexicon;
 pub mod merge;
 pub mod mixed;
 pub mod mixed_prefix;
+pub mod nine_key;
 pub mod pairs;
 pub mod predict;
 pub mod reading;

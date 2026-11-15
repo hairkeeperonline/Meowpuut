@@ -1,0 +1,33 @@
+# DevEco Studio / hvigor build artifacts
+/node_modules/
+/oh_modules/
+/build/
+**/build/
+/.hvigor/
+**/.hvigor/
+/.appanalyzer/
+**/.appanalyzer/
+
+# Native build (CMake/Ninja) intermediates
+/.cxx/
+**/.cxx/
+
+# IDE config (machine-local paths, caches)
+/.idea/
+**/.idea/
+*.iml
+.clangd
+.clang-tidy
+/.clangd
+/.clang-tidy
+
+# Signing keys & personal environment config — NEVER commit these.
+# sign-config.json5 contains plaintext keystore passwords and absolute paths
+# to the developer's ~/.ohos keystore (machine-specific).
+/.sign/
+**/.sign/
+sign-config.json5
+
+# Local SDK / toolchain paths
+local.properties
+**/local.properties

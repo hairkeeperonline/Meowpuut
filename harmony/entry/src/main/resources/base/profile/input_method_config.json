@@ -1,0 +1,25 @@
+{
+  "subtypes": [
+    {
+      "icon": "$media:icon",
+      "id": "MeowpuutZhuyin",
+      "label": "$string:ime_label",
+      "locale": "zh-TW",
+      "mode": "lower"
+    },
+    {
+      "icon": "$media:icon",
+      "id": "MeowpuutPinyin",
+      "label": "$string:ime_label",
+      "locale": "zh-CN",
+      "mode": "lower"
+    },
+    {
+      "icon": "$media:icon",
+      "id": "MeowpuutJapanese",
+      "label": "$string:ime_label",
+      "locale": "ja-JP",
+      "mode": "lower"
+    }
+  ]
+}

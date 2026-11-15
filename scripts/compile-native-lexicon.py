@@ -3,6 +3,7 @@ import collections
 import functools
 import pathlib
 import re
+import shlex
 import sys
 import json
 import sqlite3
@@ -85,6 +86,19 @@ NAME_BASE, NAME_STEP = 2400, 450  # weight of a name: base + step x ln(Wikipedia
 TERM_WEIGHT = 3200               # weight of a working word of Resources/Lexicon/terms.tsv
 
 
+def converter_argv(converter, *flags):
+    """Build the argv for the script converter.
+
+    The converter is normally a single executable (macOS: swiftc-built
+    ConvertScript). Windows has no such binary: there we point at a quoted
+    command line ``"<python>" "<convert-script.py>"``, so split it into
+    separate argv entries.
+    """
+    import shlex
+    parts = shlex.split(converter, posix=True) if " " in converter.strip() else [converter]
+    return [*parts, *flags]
+
+
 def merge_simplified(tc_bundle, converter, with_phrases):
     words, st_map = tc_bundle
     sc_data = load_mimo_sc_dataset()
@@ -97,7 +111,7 @@ def merge_simplified(tc_bundle, converter, with_phrases):
     valid = [(hans, reading, float(freq)) for hans, reading, freq in sc_data["entries"]]
     skipped = int(sc_data.get("excluded_invalid_rows", 0))
     missing = sorted({hans for hans, reading, _ in valid if (hans, reading) not in canonical})
-    converted = subprocess.run([converter, "--traditional"], input="\n".join(missing) + "\n", text=True, capture_output=True, check=True).stdout.splitlines()
+    converted = subprocess.run(converter_argv(converter, "--traditional"), input="\n".join(missing) + "\n", text=True, capture_output=True, check=True).stdout.splitlines()
     if len(converted) != len(missing): raise ValueError("Traditional conversion mismatch")
     traditional = {h: st_map.get(h, t) for h, t in zip(missing, converted)}
     def source_weight(frequency):

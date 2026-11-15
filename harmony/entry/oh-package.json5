@@ -1,0 +1,9 @@
+{
+  "name": "entry",
+  "version": "0.9.1",
+  "description": "喵扑（Meowpuut）输入法 HarmonyOS 客户端",
+  "main": "",
+  "author": "",
+  "license": "",
+  "dependencies": {}
+}
