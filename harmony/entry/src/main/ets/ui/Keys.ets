@@ -285,9 +285,23 @@ function concatArrays<T>(...arrays: T[][]): T[] {
 }
 
 function stringToCharArray(s: string): string[] {
+  // 按码点切分（emoji 是代理对，charAt 会把一个 emoji 撕成两个烂字符；
+  // ArkTS 严格模式不保证 Array.from(string) 的迭代语义，这里手写代理对合并）。
   const arr: string[] = [];
-  for (let i = 0; i < s.length; i++) {
+  let i = 0;
+  while (i < s.length) {
+    const code = s.charCodeAt(i);
+    // 高代理项 D800-DBFF 且后跟低代理项 DC00-DFFF → 合成一个码点。
+    if (code >= 0xD800 && code <= 0xDBFF && i + 1 < s.length) {
+      const next = s.charCodeAt(i + 1);
+      if (next >= 0xDC00 && next <= 0xDFFF) {
+        arr.push(s.substring(i, i + 2));
+        i += 2;
+        continue;
+      }
+    }
     arr.push(s.charAt(i));
+    i += 1;
   }
   return arr;
 }
@@ -456,8 +470,34 @@ export class KeyBuilder {
     return [['【', '】', '｛', '｝', '#', '%', '^', '*', '+', '='], ['_', '—', '＼', '｜', '～', '《', '》', '€', '&', '·'], ['…', '，', '^_^', '？', '！', "'"]];
   }
 
+  /**
+   * 【鸿蒙增强】Emoji 表情页（page ≥ 3）：安卓 0.9.1 与鸿蒙现有版都没有 emoji 面板，
+   * 而鸿蒙系统键盘/iOS 都有——这是用户点名的「emoji 适配」差异。
+   * 每页 3 行 × 最多 10 列；page 3~6 对应 笑脸 / 手势爱心 / 动物自然 / 食物 四类。
+   * 入口在符号第 2 页的切换键（「#+=」→「☺」），emoji 页内用同一颗键循环切分类。
+   */
+  static emojiRows(page: number): string[][] {
+    const pick = (s: string): string[][] => {
+      const flat = stringToCharArray(s);
+      return [flat.slice(0, 10), flat.slice(10, 20), flat.slice(20, 30)];
+    };
+    if (page === 4) return pick('🤗🤭🤫🤔🤌🤏✌🤞🤟🤘🤙👈👉👆👇☝👍👎✊👊🤛🤜👏🙌👐🙏💪');
+    if (page === 5) return pick('🐶🐱🐭🐹🐰🦊🐻🐼🐨🐯🦁🐮🐷🐸🐵🐔🐧🐦🐤🦆🦅🦉🦇🐺🐗🐴🦄🐝🐛');
+    if (page === 6) return pick('🍎🍏🍐🍊🍋🍌🍉🍇🍓🫐🍈🍒🍑🥭🍍🥥🥝🍅🥑🍆🥔🥕🌽🌶🥒🍄🥜🍞🍖');
+    return pick('😀😃😄😁😆😅🤣😂🙂🙃😉😊😇🥰😍🤩😘😗😚😙🥲😋😛😜🤪😝🤑🤠🥳');
+  }
+
+  /** emoji 分类页序号（3~6）与展示名（符号页/emoji 页切换键标签）。 */
+  static emojiPageLabel(page: number): string {
+    if (page === 4) return '手势';
+    if (page === 5) return '动物';
+    if (page === 6) return '食物';
+    return '笑脸';
+  }
+
   private static symbols(context: KeyContext, page: number, chinese: boolean, t: Words): KeySet {
-    const source = KeyBuilder.symbolRows(page, chinese);
+    const emoji = page >= 3;
+    const source = emoji ? KeyBuilder.emojiRows(page) : KeyBuilder.symbolRows(page, chinese);
     const keyOf = (text: string): Key => {
       const altArr = SYMBOL_ALTERNATES.get(text);
       const alts: string[] = [];
@@ -469,7 +509,17 @@ export class KeyBuilder {
       return new Key(new KeyActionText(text), text, null, KeyStyle.CHARACTER,
         alts, true, true, text.length > 1 ? 16 : 21, text);
     };
-    const other = new Key(new KeyActionPage(page === 1 ? 2 : 1), page === 1 ? '#+=' : '123', null, KeyStyle.UTILITY, [], false, true, 16, page === 1 ? t.pick('更多符號', '更多符号') : t.pick('數字', '数字'));
+    // 切换键：数字页「#+=」进第 2 页；第 2 页「☺」进 emoji 分类；emoji 页循环下一分类（回 3）。
+    let other: Key;
+    if (emoji) {
+      const next = page >= 6 ? 3 : page + 1;
+      other = new Key(new KeyActionPage(next), KeyBuilder.emojiPageLabel(page), null,
+        KeyStyle.UTILITY, [], false, true, 15, `表情分类：${KeyBuilder.emojiPageLabel(next)}`);
+    } else if (page === 1) {
+      other = new Key(new KeyActionPage(2), '#+=', null, KeyStyle.UTILITY, [], false, true, 16, t.pick('更多符號', '更多符号'));
+    } else {
+      other = new Key(new KeyActionPage(3), '☺', null, KeyStyle.UTILITY, [], false, true, 16, '表情');
+    }
     let lettersLabel: string;
     if (context.english) lettersLabel = 'ABC';
     else if (context.mode === InputMode.ZHUYIN) lettersLabel = '注音';

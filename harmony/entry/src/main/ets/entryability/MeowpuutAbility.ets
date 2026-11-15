@@ -5,6 +5,7 @@
  */
 import { InputMethodExtensionAbility, inputMethodEngine, InputMethodSubtype } from '@kit.IMEKit';
 import { ConfigurationConstant, common, Want } from '@kit.AbilityKit';
+import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { display } from '@kit.ArkUI';
 import { inputMethod } from '@kit.IMEKit';
@@ -55,6 +56,7 @@ class AbilityCallbacks implements KeyboardCallbacks {
   onPunctuation(mark: string): void { this.ability.onPunctuation(mark); }
   onToggleExpanded(): void { this.ability.onToggleExpanded(); }
   onPet(cat: string): void { this.ability.onPet(cat); }
+  onDragPanel(dx: number, dy: number): void { this.ability.dragPanel(dx, dy); }
 }
 
 export default class MeowpuutAbility extends InputMethodExtensionAbility {
@@ -62,6 +64,8 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
   private kbController: inputMethodEngine.KeyboardController | null = null;
   private inputClient: inputMethodEngine.InputClient | null = null;
   private panel: inputMethodEngine.Panel | null = null;
+  /** 最近一次面板高度（悬浮切换宽度时保持高度不变）。 */
+  private lastPanelHeight: number = 0;
 
   private prefs: Prefs = new Prefs();
   private lexicons: Lexicons | null = null;
@@ -148,6 +152,21 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     hilog.info(0x0000, 'MeowpuutIME', 'onCreate start');
     this.host.resourceManager = ctx.resourceManager;
     this.installHostCallbacks();
+    // 【跨进程设置同步】文件通道（filesDir/preferences XML）在 main 与 inputMethod
+    // 进程间被沙盒隔离（真机实测同一路径互不可见），改用系统公共事件广播：
+    // 设置页进程 publish、本进程订阅，收到全量快照后热应用——键盘弹着也能立即生效。
+    this.prefs.subscribe(() => {
+      const before = this.mode;
+      this.composer.simplified = this.prefs.simplified;
+      this.applyLook();
+      this.applyPanelPosition();
+      const after = this.mode;
+      if (after !== before || this.sessionMode !== after) {
+        this.sessionMode = null;
+        this.openLexicon();
+      }
+      this.refreshKeyboard();
+    });
     // 订阅软键盘显示/隐藏与子类型切换。
     this.ability.on('inputStart', (kbController: inputMethodEngine.KeyboardController,
       inputClient: inputMethodEngine.InputClient) => {
@@ -162,6 +181,22 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
       this.caps.reset();
       this.shiftHeld = false;
       this.openLexicon();
+      // 组字预览能力探测（对照官方 KikaInputMethod）：编辑框不支持预览时直接跳过，
+      // 避免每次按键都发一次注定失败的 IPC。同时把预览样式设为下划线（同安卓组字下划线）。
+      this.previewSupported = true;
+      this.previewLength = 0;
+      try {
+        const attr = inputClient.getEditorAttributeSync();
+        this.previewSupported = attr.isTextPreviewSupported;
+      } catch (e) {
+        this.previewSupported = true;
+      }
+      try {
+        const style: Record<string, inputMethodEngine.CommandDataType> = { 'previewTextStyle': 'underline' };
+        inputClient.sendPrivateCommand(style).catch(() => {});
+      } catch (e) {
+        // 私有指令不被支持时忽略。
+      }
       // 设置页在另一个进程里改了偏好（输入模式、外观等），本进程的 Prefs
       // 是 onCreate 时读的快照，不会自己更新。这里必须「等」重新读完再建面板，
       // 否则第一次唤起仍会用旧的输入模式（行数 5/4 也不同，面板高度会错）。
@@ -221,7 +256,26 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
         (oldBegin: number, oldEnd: number, newBegin: number, newEnd: number) => {
           // 跟踪选区状态：onDelete 时若有选区，应先删选区（对照 Android getSelectedText）。
           this.hasSelection = newBegin !== newEnd;
+          // 预览同步（setPreviewText/finishTextPreview）本身会让光标移动并回调 selectionChange，
+          // 若把它当成「用户把光标移走」而清空组字，会出现「每输一个字母前一个就消失」的致命回归
+          // （真机取证：PV 日志里第二键 wasC=false，raw 被本回调清掉）。一次按键可能触发不止一个
+          // 回调，因此用时间窗抑制：预览调用后 SELF_DRIVEN_MS 内的选区变化一律视为自驱动。
+          if (this.composer.composing && this.lastPreviewAt > 0 &&
+            Date.now() - this.lastPreviewAt < MeowpuutAbility.SELF_DRIVEN_MS) {
+            return;
+          }
           if (this.composer.composing && (newBegin !== oldBegin || newEnd !== oldEnd)) {
+            // 用户真把光标移走了：先把预览落地成普通文本（对齐 Android 的 composing 文本
+            // 留在原处变成非组字文本），再清组字状态——否则预览悬空，后续 {-1/-1} 更新
+            // 会作用在过期的预览区上，新字母插不进新光标位置。
+            if (this.previewSupported && this.inputClient !== null) {
+              try {
+                this.lastPreviewAt = Date.now();
+                this.inputClient.finishTextPreview();
+              } catch (e) {
+                // 落地失败也继续清组字，避免候选栏挂着过时状态。
+              }
+            }
             this.composer.clear();
             this.expanded = false;
             this.refreshKeyboard();
@@ -311,12 +365,66 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
       panel.setUiContent('pages/KeyboardPage');
       // 面板默认高度是 1px，不 resize 的话窗口撑不开，看起来就像"唤不起来"。
       await this.resizePanel();
+      // 键盘位置（贴底/悬浮）——prefs 里已是悬浮时创建即悬浮。
+      await this.applyPanelPosition();
       // 官方流程要求显式 show()，否则面板只是被创建但不会显示。
       await panel.show();
       hilog.info(0x0000, 'MeowpuutIME', 'setUiContent + show done');
       this.refreshKeyboard();
     } catch (e) {
       hilog.error(0x0000, 'MeowpuutIME', `createPanel failed: ${JSON.stringify(e)}`);
+    }
+  }
+
+  /** 悬浮面板当前位置（拖动累计用）。 */
+  private floatX: number = 0;
+  private floatY: number = 0;
+
+  /** 【悬浮键盘】拖动把手：增量移动面板（钳制在屏幕内）。 */
+  dragPanel(dx: number, dy: number): void {
+    if (this.panel === null || this.prefs.keyboardPosition !== 'floating') return;
+    const disp: display.Display = display.getDefaultDisplaySync();
+    const nx = Math.max(0, Math.min(disp.width - 24, this.floatX + dx));
+    const ny = Math.max(0, Math.min(disp.height - 200, this.floatY + dy));
+    this.floatX = nx;
+    this.floatY = ny;
+    this.panel.moveTo(nx, ny).catch(() => {});
+    hilog.info(0x0000, 'MeowpuutIME', `panel dragged to (${nx},${ny})`);
+  }
+
+  /**
+   * 【键盘位置】bottom=贴底（FLG_FIXED）/ floating=悬浮（FLG_FLOATING + moveTo 抬高）。
+   * 悬浮键盘：panel 宽度保持全宽（>288vp 不会触发系统迷你布局），通过 moveTo
+   * 把面板抬离底部 220px，用户可在键盘顶部拖动条拖动（KeyboardPage 里的 handle）。
+   */
+  private async applyPanelPosition(): Promise<void> {
+    if (this.panel === null) return;
+    const floating = this.prefs.keyboardPosition === 'floating';
+    this.host.draggable = floating;
+    // AppStorage 双向绑定：KeyboardPage 的 @StorageLink 会立即重渲染显示/隐藏把手。
+    AppStorage.setOrCreate('meowpuutDraggable', floating);
+    try {
+      this.panel.changeFlag(floating
+        ? inputMethodEngine.PanelFlag.FLG_FLOATING
+        : inputMethodEngine.PanelFlag.FLG_FIXED);
+      if (floating) {
+        const disp: display.Display = display.getDefaultDisplaySync();
+        // 悬浮卡片视觉：左右各留 24px 边距（面板宽度收窄 48px），顶部抬到
+        // 约 22% 屏高，四周都有可见留白，像一张浮在应用上的卡片。
+        const margin = 24;
+        const w = Math.max(90 * (disp.densityDPI / 160), disp.width - margin * 2);
+        await this.panel.resize(Math.round(w), this.lastPanelHeight);
+        const x = margin;
+        const y = Math.round(disp.height * 0.22);
+        this.floatX = x;
+        this.floatY = y;
+        await this.panel.moveTo(x, y);
+        hilog.info(0x0000, 'MeowpuutIME', `panel floating ${Math.round(w)}px, moved to (${x},${y})`);
+      } else {
+        hilog.info(0x0000, 'MeowpuutIME', 'panel fixed (bottom)');
+      }
+    } catch (e) {
+      hilog.warn(0x0000, 'MeowpuutIME', `applyPanelPosition failed: ${JSON.stringify(e)}`);
     }
   }
 
@@ -343,8 +451,12 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     const scaledKeys: number = keysDp * this.look.heightScale;
     const dpHeight: number = region.height + scaledKeys;
     const height: number = Math.round(dpHeight * density);
+    this.lastPanelHeight = height;
     try {
-      await this.panel.resize(width, height);
+      // 悬浮态保持收窄的宽度（卡片边距），贴底态用全宽。
+      const w = this.prefs.keyboardPosition === 'floating'
+        ? Math.max(90 * density, width - 48) : width;
+      await this.panel.resize(w, height);
       hilog.info(0x0000, 'MeowpuutIME',
         `panel resized ${width}x${height} dp=${dpHeight.toFixed(1)} (${rows}行, 候选栏${region.height.toFixed(1)})`);
     } catch (e) {
@@ -396,7 +508,12 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
   private getTextBeforeCursor(length: number): string {
     if (this.inputClient === null) return '';
     try {
-      return this.inputClient.getBackwardSync(length);
+      // 注意命名反直觉（SDK d.ts L1230/L1279 官方文档）：
+      //   getForwardSync  = 取光标「前」的文字（Obtains the text BEFORE the cursor）
+      //   getBackwardSync = 取光标「后」的文字（Obtains the text AFTER the cursor）
+      // 此处要取光标前，必须用 getForwardSync；错用 getBackwardSync 会导致光标在文末时
+      // 取到空串，进而误判「光标前无文字」去删光标后（文末无字）→ 退格删不掉最后一个字符。
+      return this.inputClient.getForwardSync(length);
     } catch (e) {
       return '';
     }
@@ -456,17 +573,36 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     if (newline) {
       this.commit('\n');
     } else {
-      this.inputClient.sendKeyFunction(1); // 1 = 确认键（回车），编辑框按其 enterKeyType 触发 send/search/go 等
+      // 【实测】sendKeyFunction 的参数在当前框架实现里被直接 cast 成 EnterKeyType 透传给应用
+      // （InputMethodController::SendFunctionKey → EnterKeyType(functionKey)），
+      // 因此传固定值 1 会被当成 EnterKeyType(1)=NONE，微信等 RichEditor 应用收不到 SEND 语义，
+      // 只能按默认动作换行。这里改为传入编辑框自己声明的 enterKeyType（微信=4=SEND），
+      // 让参数与编辑框期望的动作一致。失败时退回文档写明的确认键 1。
+      this.inputClient.sendKeyFunction(keyType).catch((e: BusinessError) => {
+        hilog.warn(0x0000, 'MeowpuutIME', `sendKeyFunction(${keyType}) failed: ${e.code}, retry with 1`);
+        this.inputClient?.sendKeyFunction(1).catch(() => {});
+      });
     }
   }
 
   // ---------------------------------------------------------------- 引擎
 
   private applyEdit(edit: Edit, wasComposing: boolean, resetPanel: boolean = false): void {
+    const nowComposing = this.composer.composing;
+    // 预览同步必须先于 commit：组字结束选候选时，预览区承载「把 nihao 换成汉字」的动作，
+    // 若先 insertText 汉字，finishTextPreview 会把残留的 nihao 也落地，导致「你好 nihao」错乱。
+    this.syncComposingText(wasComposing, edit.commit);
     if (edit.commit.length > 0) {
-      this.commit(edit.commit);
+      // 只要这次按键序列开始时处于组字态且预览可用，上屏动作就由 syncComposingText 的预览链完成：
+      //   - 组字结束：setPreviewText(commit)+finishTextPreview 落地（预览区承载「nihao→汉字」替换）；
+      //   - 分词（commit 后仍组字）：三步链 落地已选字+开剩余组字新预览。
+      // 其余情况（非组字直接 commit、编辑框不支持预览）走 insertText 兜底，保证汉字绝不丢失。
+      const committedViaPreview = wasComposing && this.previewSupported;
+      if (!committedViaPreview) {
+        this.commit(edit.commit);
+      }
     }
-    if (!this.composer.composing) {
+    if (!nowComposing) {
       this.expanded = false;
       if (edit.commit.length > 0) {
         this.updatePredictions();
@@ -474,6 +610,114 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
       }
     }
     this.refreshKeyboard(resetPanel);
+  }
+
+  private previewLength: number = 0;
+
+  /**
+   * 预览同步自驱动选区变化的抑制窗口（毫秒）。
+   * setPreviewText / finishTextPreview 会让编辑框光标移动并回调 on('selectionChange')；
+   * 该回调原本用于「用户把光标移走时清空未完成组字」，若不加区分会把输入法自己造成的
+   * 光标移动也当成用户操作，从而每敲一个字母就把上一个字母的组字状态清掉。
+   * 预览调用后该窗口内的选区变化一律视为自驱动，不触发组字清理。
+   */
+  private static readonly SELF_DRIVEN_MS: number = 700;
+
+  /** 最近一次预览 API 调用的时间戳（0 = 尚未调用过）。 */
+  private lastPreviewAt: number = 0;
+
+  /** 预览操作串行队列：保证跨按键的 setPreviewText/finishTextPreview 严格按序执行。 */
+  private previewChain: Promise<void> = Promise.resolve();
+
+  /** 组字预览开关。 */
+  private static readonly PREVIEW_ENABLED: boolean = true;
+
+  /** 当前编辑框是否支持文本预览（isTextPreviewSupported 探测结果）。 */
+  private previewSupported: boolean = true;
+
+  /**
+   * 组字预览：把当前原始串（如 nihao）显示在输入框，选择候选后替换成汉字，
+   * 与 Android applyEdit 的 setComposingText / commitText 状态机对齐。
+   *
+   * 【语义依据】本地 SDK @ohos.inputMethodEngine.d.ts 官方注释（权威，非二手）：
+   *   setPreviewText(text, range)：
+   *     - {start:-1, end:-1}        → 替换整个预览区（官方为「更新组字」设计的语义）
+   *     - start === end             → 在 start 处插入 text
+   *     - start !== end             → 用 text 替换 [start, end) 区间
+   *     - 已有预览时 range 不得超出预览区；无预览时 range 不得超出文本框
+   *   finishTextPreview()           → 预览文本「落地」（上屏为正式文本）
+   *   另有官方示例 KikaInputMethod：sendKeyFunction 后紧跟 finishTextPreview 让预测词落地。
+   *
+   * 因此：
+   *   - 组字中      → setPreviewText(preedit, {-1,-1}) 维护预览区为当前组字显示（带下划线）
+   *   - 组字结束+commit → setPreviewText(commit, {-1,-1}) 把预览区换成汉字，再 finishTextPreview() 落地
+   *   - 组字结束无commit → setPreviewText('', {-1,-1}) 清空预览 + finishTextPreview() 固化空（丢弃，对齐 commitText("",1)）
+   * 全程不依赖 insertText 与预览区的隐式交互，语义精确对齐 Android 的 commitText 替换 composing region。
+   * 注：组字显示用 composer.preedit（对齐 Android setComposingText(preedit)），拼音/注音/日语/英文四模式
+   * 各自正确——拼音 preedit=raw，注音 preedit=带声调注音，日语 preedit=罗马字读音。
+   */
+  private syncComposingText(wasComposing: boolean, commitText: string): void {
+    if (!MeowpuutAbility.PREVIEW_ENABLED) return;
+    if (this.inputClient === null || !this.previewSupported) return;
+    const nowComposing = this.composer.composing;
+    // 对齐 Android applyEdit 的 setComposingText(composer.preedit, 1)：组字显示的是 preedit，
+    // 而非 raw。两者在拼音模式相同（preedit=raw），但注音模式 preedit=带声调注音（NativeEngine.preedit）、
+    // 日语模式 preedit=罗马字读音（Romaji.reading），必须用 preedit 才能在四种模式下都对齐。
+    const preedit = this.composer.preedit;
+    const client = this.inputClient;
+    const range = { start: -1, end: -1 } as inputMethodEngine.Range;
+    // 构造本次按键的预览操作配方。跨按键的 IPC 必须严格按序执行（分词链有「替换→落地→开新预览」
+    // 三步，若被下一键的 setPreviewText 插队，{-1,-1} 的「沿用当前预览范围」语义会作用在错误的
+    // 预览状态上），因此所有配方进入串行队列逐个执行。
+    let ops: Array<() => Promise<void>> = [];
+    if (nowComposing && commitText.length > 0) {
+      // 分词（如 nihao 选「你」剩 hao）：预览区换成已选字 → 落地 → 剩余组字在光标处开新预览。
+      // 对齐 Android commitText(commit) 结束旧 composing 后 setComposingText(preedit) 开新的。
+      this.previewLength = preedit.length;
+      ops = [
+        () => client.setPreviewText(commitText, range),
+        () => client.finishTextPreview(),
+        () => client.setPreviewText(preedit, range),
+      ];
+    } else if (nowComposing) {
+      // 组字中：预览区 = preedit（{-1,-1} 沿用当前预览范围：首次=光标处插入，之后=整区替换）。
+      this.previewLength = preedit.length;
+      ops = [() => client.setPreviewText(preedit, range)];
+    } else if (wasComposing && commitText.length > 0) {
+      // 组字结束且要上屏汉字：把预览区换成汉字，再落地。
+      this.previewLength = 0;
+      ops = [
+        () => client.setPreviewText(commitText, range),
+        () => client.finishTextPreview(),
+      ];
+    } else if (wasComposing) {
+      // 组字结束且无提交（退格删空、取消等）：把预览区清空再落地。
+      // 不能直接 finishTextPreview()——它会「固化」预览内容（把残留字符上屏），而退格删空
+      // 需要的是「丢弃」（对齐 Android commitText("", 1) 清空 composing）。
+      this.previewLength = 0;
+      ops = [
+        () => client.setPreviewText('', range),
+        () => client.finishTextPreview(),
+      ];
+    }
+    if (ops.length === 0) return;
+    // 预览 API 会移动光标并回调 selectionChange，打开自驱动抑制窗口（一次按键可能触发多个回调）。
+    this.lastPreviewAt = Date.now();
+    const run = (): Promise<void> => {
+      let p: Promise<void> = Promise.resolve();
+      for (const op of ops) {
+        p = p.then(() => {
+          if (!this.previewSupported) return;
+          this.lastPreviewAt = Date.now();
+          return op();
+        });
+      }
+      return p;
+    };
+    this.previewChain = this.previewChain.then(run).catch(() => {
+      // 预览失败（编辑框不支持等）：置为不可用，后续走 insertText 兜底，不影响正常上屏。
+      this.previewSupported = false;
+    });
   }
 
   private finishComposition(): void {
@@ -601,12 +845,15 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     }
     const before = this.getTextBeforeCursor(word ? 48 : 16);
     if (before.length === 0) {
-      // 光标前无文字 → 删光标后（对应 Android sendDownUpKeyEvents(KEYCODE_DEL)）。
-      // 方向命名与 Android 相反：deleteBackward 删光标「后」。
+      // 光标前没有可删的字符（已在文本开头）。
+      // 【重要】这里绝不能退化成「删光标后」——退格只能删光标前的字符，
+      // 删光标后会让用户丢失光标之后的文字（真机实测曾复现：'全球ab、我' → '全球ab、'，
+      // 光标后的「我」被删掉）。若焦点区确实有可删内容但取不到光标前文本，
+      // 用 deleteForwardSync 兜底（按 SDK 语义它同样是删光标「前」），失败则直接不动。
       try {
-        this.inputClient?.deleteBackwardSync(1);
+        this.inputClient?.deleteForwardSync(1);
       } catch (e) {
-        this.inputClient?.deleteBackward(1);
+        // 无可用接口时保持原文本不变，宁可不删也不误删光标后内容。
       }
       return;
     }
@@ -823,8 +1070,14 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
 
   onPet(cat: string): void {
     const simplified = this.prefs.simplified;
-    const outcome = this.affection.pet(Date.now());
     const w = (s1: string, s2: string) => simplified ? s2 : s1;
+    // 对照 Android CandidateBarView.pet（L711-719）：拍米米莫（黑猫）只撒粒子、只做弹跳，
+    // **不参与 affection 计数**，也不触发简繁切换；只有莫莫（橘猫）走5下切简繁。
+    if (cat === 'mimimo') {
+      this.host.announceCat('mimimo', '', -1);
+      return;
+    }
+    const outcome = this.affection.pet(Date.now());
     let toast: string;
     let hearts = -1;
     if (outcome instanceof CatOutcomeHappy) {
@@ -836,9 +1089,15 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
       this.composer.simplified = nowSimple;
       this.refreshKeyboard();
     } else if (outcome instanceof CatOutcomePleased) {
-      hearts = outcome.count;
-      const left = CatAffection.PETS_TO_SWITCH - outcome.count;
-      toast = simplified ? `再摸 ${left} 下，切换为繁体` : `再摸 ${left} 下，切換為简体`;
+      // 对照 Android CandidateBarView.kt:722：只有 count >= 2 才显示「再摸 N 下」提示与爱心进度条，
+      // 拍第 1 下不出提示（避免第一下就弹）。
+      if (outcome.count >= 2) {
+        hearts = outcome.count;
+        const left = CatAffection.PETS_TO_SWITCH - outcome.count;
+        toast = simplified ? `再摸 ${left} 下，切换为繁体` : `再摸 ${left} 下，切換為简体`;
+      } else {
+        toast = '';
+      }
     } else {
       toast = '';
     }
@@ -854,7 +1113,19 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     this.opening = target;
     this.loading = target !== InputMode.JAPANESE;
     this.lexiconFailed = false;
+    // 看门狗：Lexicons.open 在并发代次被顶掉时会提前 return 而不触发回调，
+    // 导致 loading 永久为 true（界面一直「词库载入中」）。超时后兜底解除 loading。
+    const watchdog = setTimeout(() => {
+      if (this.loading && this.opening === target) {
+        hilog.warn(0x0000, 'MeowpuutIME', 'lexicon open timeout, release loading state');
+        this.loading = false;
+        this.opening = null;
+        this.lexiconFailed = true;
+        this.refreshKeyboard();
+      }
+    }, 3000);
     this.lexicons?.open(target, (session: number) => {
+      clearTimeout(watchdog);
       this.opening = null;
       this.loading = false;
       this.lexiconFailed = target !== InputMode.JAPANESE && session === 0;

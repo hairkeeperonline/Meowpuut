@@ -5,6 +5,27 @@
 
 ## 已完成（本轮）
 
+- [x] **设置项跨进程同步修复（round 45，本轮架构基石，真机端到端验证）**：用户反馈设置页改了「色调/色系/视觉特效/键盘高度」等后键盘不变。根因是 **HarmonyOS 沙箱把主进程（SettingsAbility）与 inputMethod 扩展进程完全隔离**——两个进程的 `filesDir` 和 `preferencesDir` 字符串路径完全相同（`/data/storage/el2/base/haps/entry/...`）但互相不可见：主进程写完 XML 并 flush 回读成功（`flush done, xml 113B`），IME 进程读同一路径返回 `No such file or directory`（已真机实证）；SDK 的 `dataGroupId` 共享 preferences 文档标注 RP1 不可用。修复方案 = **commonEventManager 发布订阅**：`Prefs.put()` 每次写入后 `broadcast(key,value)` 发布 `com.krysta1ll.meowpuut.SETTINGS`，data 为 JSON `{key, value, all}`，`all` 是 `snapshotAll()` 从全部 getter（非 mirror——重装后 mirror 为空）构建的 **17 键全量快照**；IME 进程 `onCreate` 里 `subscribe()`，收到后①覆盖内存 mirror ②`persistSnapshot()` 全量写进 IME 自己的 Preferences（冷启动自恢复）③热应用回调（simplified/applyLook/applyPanelPosition/openLexicon 若 mode 变/refreshKeyboard）——**键盘弹着时改动也即时生效**。设置页 `aboutToAppear` 初始化完成后 `publishSnapshot()`（key='*'）作对齐兜底（真机日志：重进设置页即补发 `effects=standard (17 keys)`，悬浮态由此恢复）。冷启动验证：force-stop 后重弹键盘，深色+海盐蓝仍保持。17 键 = mode/simplified/shape/tone/palette/strength/cats/festivals/haptics/sound/keyPopups/hapticStrength/keySound/keySoundVolume/keyboardHeight/effects/keyboardPosition。
+- [x] **键盘位置「悬浮」真实现（round 45，Android 0.9.1 对齐，真机全链路验证）**：原实现是空壳（onSelect 注释「悬浮档预留」）。现用系统原生能力：`panel.changeFlag(FLG_FLOATING)` 切悬浮 + `panel.resize(屏宽-48)` 左右各留 24px 边距 + `panel.moveTo(24, 屏高×0.22)` 抬到屏幕中上部 + 面板顶部 **32px 拖动把手**（PanGesture 每 24px 增量调 `panel.moveTo`，clamp 在屏内）。两个关键坑：① `setPanelFlag` 不存在，真 API 名是 `panel.changeFlag(flag)`（同步方法）；② 把手显隐如果走普通类字段（`host.draggable`）**非响应式不刷新**——`setUiContent` 时是 false，后续改 true 面板不重渲染；必须走 `AppStorage.setOrCreate('meowpuutDraggable', floating)` + KeyboardPage `@StorageLink` 双向绑定（注意 `draggable` 是组件内置属性名会编译冲突，改名 `floatDraggable`）。真机验证：悬浮态面板 1272px 宽居中于 (24,466)，下方露出笔记内容（「共 41 字」可见、不推挤应用布局）；拖动把手 (24,466)→(332,774) 像素实测键盘左上角随之移动（y1000 行左边界 24→332）；切回「贴底」`panel fixed (bottom)` 恢复全宽 1320 贴底。把手初始 `#B0FFFFFF` 在白底笔记上不可见，改 `#8C787880` 半透明深灰后真机可见（y507 采样 (176,175,180)）。
+- [x] **键盘高度三档真机量化（round 45）**：较矮/标准/较高 → 面板顶 y=980/919/835 px（1320×2120 屏，注音 5 行）。实现链路 `prefs.keyboardHeight` → `Look.heightScale`(0.88/1.0/1.12) → `resizePanel` 的 `scaledKeys` 与键盘绘制同步缩放。三档切换广播 `keyboardHeight=tall/short` 均真机收到并重算面板。
+- [x] **六套色系逐一像素级验证（round 45，暗色基调）**：候选药丸+玻璃染色按色系变化，真机逐套切换并像素分类——玫瑰奶茶 rose 15395 红系像素、海盐蓝 ocean 13917 蓝系、鼠尾草绿 sage 8723 绿系（关猫后干净）、雾紫 lavender 4959 紫系（高R高B）、琥珀蜜 amber 红橙族 G-B=16.2（G-B>12 像素 12015，与 rose 纯红族 G-B≈0-5 明确区分）、石墨 graphite 彩色像素骤降至 2894（对比 rose 16876，去色即设计意图）。测量法：暗色下候选玻璃的 caustic 用 `paletteColor` 染色（rose #FFE69687 / ocean #FF70BAF0 / sage #FF9CC7A1 / lavender #FFC2A8F0 / amber #FFF0BF6B / graphite #FFC2CCD9），对候选栏区做色相分类计数；猫装饰会干扰，验证时先关猫（`cats=false`）。
+- [x] **造型三档真机验证（round 45）**：胶囊=平直圆角上边缘、波浪=明显 S 形起伏、云朵=圆弧鼓包——三张候选玻璃截图拼接后视觉逐档确认，`GlassOutline` 的 waveOffset 正弦 + CLOUD_BUMPS 数学全部生效。
+- [x] **玻璃强度三档真机验证（round 45）**：柔和/标准/通透 = glassFill alpha 0.74/0.62/0.50（暗色底 0x3A302C）。候选玻璃中上带（y1155-1210）平均色单调变化 (94.4,88.8,87.6)→(96.8,92.8,92.0)→(98.1,95.8,96.4)——alpha 越低透出越多下层 caustics 虹彩。暗底上差异细腻属设计内（对应 Android 同参数）；测量要点：候选玻璃真身在 zhuyin 面板 y1150-1290，别量到笔记区。
+- [x] **视觉特效三档差异化验证（round 45）**：轻量=动效时长归零（lean 140ms，组字区即时渲染已截图验证）；极致=glassFill alpha ×0.82（0.62×0.82≈0.51），真机实测极致档玻璃带 (98.1,95.8,96.4) 与通透档 0.50 的测量值**逐位精确一致**——数学交叉验证成立；标准=默认。设置页 3 档 Slider。
+- [x] **设置页 valueText 不刷新修复（round 45）**：真机发现视觉特效拖到 0 后 valueText 仍显示「标准」。根因：`@Builder` 函数参数按值传递**不响应 @State 变化**（rowSlider/rowSelect 共性问题；Select 因组件内部 selected 属性恰幸免）。修复：视觉特效行内联展开，Text 直接绑定 `this.effects` 三元表达式，真机实测档位变化即时显示「轻量/极致」。
+- [x] **米米莫与莫莫（cats）开关双向验证（round 45）**：`cats=false` 广播后猫装饰像素消失（sage 测量中 rose 噪声 2712→253）；`cats=true` 恢复后候选栏右侧双猫可见（黑猫黄眼趴姿 + 暹罗坐姿，视觉确认）。
+- [x] **按键气泡（keyPopups）开关双向验证（round 45）**：用 `uinput -T -d/-u`（触屏按下/抬起分离）保持按住 ㄋ 时截图——开：按住键上方出现放大气泡预览（放大 ㄋ 字符 + 指向原键的小尾巴，iOS 样式）；关：同位置无任何气泡。`showBalloon` 前有 `keyPopupsEnabled()` 闸门。
+- [x] **振动（haptics）开关 + 强度分档系统日志验证（round 45）**：不再只看自家代码——读系统 `MiscdeviceService` 日志：强档按键 `PlayPrimitiveEffect ... effect:haptic.effect.sharp, intensity:100`；轻档 `haptic.effect.soft, intensity:40`；关闭后按键 **0 条**振动调用。`vibrator.isSupportEffectSync` 不支持时回退 `vibrate(ms)`。振动与音效独立（关震动不影响按键声）。
+- [x] **按键声 8 档验证（round 45）**：选项 关闭/系统/水滴/木琴/玻璃/毛毡/五声/泛音（对齐 Android key-sounds 资源目录 felt/glass/harmonic/marimba/penta/water），SoundPool 播 WAV + 每类多变体随机（key 4/delete 3/space 3/return 1/pick 3；五声用 key0-5 九键音色）。真机选「水滴」：`keySound=water` 广播 + IME 进程 AudioStream `Stop end streamID=1` + `audio_server HpaeRendererManager mixerNode trigger callback` ——音频管线真实发声。音效音量为 100% 禁用占位（对齐 Android disabled SeekBar）。
+- [x] **色调三档验证（round 45）**：深色键盘底 (91,90,96)、浅色 (252,252,254)、跟随系统读 `configuration.colorMode`。切换广播 `tone=dark` 热应用即时生效。
+- [x] **节日装扮接线复核（round 45）**：`applyLook` 里 `festivalWardrobe.on = prefs.festivals`，`Festivals.theme(Festivals.today(), ...)` 今日无节日时返回 null 不换装——开关语义正确（节日期间才生效），非节日季无可视差异属预期。
+- [x] **Emoji 表情面板（round 33，鸿蒙增强功能，真机验证）**：安卓 0.9.1 与鸿蒙旧版都没有 emoji 面板，用户点名「emoji 还没做适配」。实现：符号页 2 的切换键「#+=」改为「☺」入口，新增 page 3~6 四个 emoji 分类页（笑脸/手势/动物自然/食物，每页 3 行×10 个，共 ~110 个常用 emoji），emoji 页内同一颗键显示当前分类名并循环切换（3→4→5→6→3），点击 emoji 直接上屏、停留在 emoji 页（对齐 iOS/系统键盘惯例）。**关键坑**：`stringToCharArray` 原来用 `charAt` 逐位切，emoji 代理对被撕成烂字符导致键帽全空白；ArkTS 里 `Array.from(string)` 的码点迭代语义也不可靠——已手写「高代理+低代理合并」的码点切分。Canvas `fillText` 对彩色 emoji 渲染完好（28vp 字号下 measureText 宽度正常）。真机验证：网格渲染✓、点击上屏✓（😉🤩 进入笔记正文）、分类切换✓（笑脸→手势）。
+- [x] **摸猫触控命中顺序对齐 Android（round 33，真机验证）**：鸿蒙原顺序「箭头→候选行→猫」导致猫身体（玻璃内部分）全被候选行拦截、点不到猫。已改为 Android `CandidateBarView.onTouchEvent` 的顺序「**猫优先**（touch 框命中且不让位箭头区/候选胶囊区）→ 箭头 → 候选行」。真机验证：点黑猫 → `barTouch → ability.onPet → pet()` 全链路日志通、金色爪印粒子喷出；连摸暹罗 5 下 → 简繁切换 toast「换为繁体中文」正常弹出。
+- [x] **双猫聚拢候选栏右端 + Canvas drawImage 单位修复（round 33，真机像素级对齐安卓 0.9.1）**：
+  - **布局**：废弃旧「黑猫左端 + 暹罗右端」两端布局，改为 0.9.1 的「双猫聚拢右端」——黑猫（lounge 趴）中心 ≈76.9% 屏宽、暹罗（rest 坐）中心 ≈90% 屏宽（安卓基准 830px/972px@1080px），两猫爪基线贴玻璃上沿（含圆弧抬升 rise），可见高一致（FILL=0.80）。`CatSeats.ends()` 重写为锚点式落座（不再要求不遮候选——0.9.1 双猫本来就压在候选行右端尾部），`fallback()` 同步为 90%/76.9% 中心定位；删除了旧的 `seat()` 滑动搜索（lounge 太宽导致落座必失败）。真机实测：黑猫中心 75.5%（基准 76.9%）、暹罗 90.2%（基准 90.0%）、黑猫 164px 宽（基准换算 159px）、爪底 1148px=玻璃顶 1151px，全部达标。
+  - **Canvas drawImage 单位（关键坑）**：真机（API 26 / Pura X / density 3.0）实测 `CanvasRenderingContext2D.drawImage` 的 **dest.x/y 按 vp 坐标解释、dest.w/h 却按物理像素 1:1 解释**（与路径/文字的 vp 语义不一致）。修复：`drawCatImage()`/`drawFestivalEnd()` 只对 **宽高乘 pxRatio()**（densityDPI/160），左上角保持 vp 原值——乘错位置会让猫飞出画布（只残留 vp 单位的爪影椭圆），不乘宽高则猫只有 1/3 大小。
+  - **几何**：`CAT_HEADROOM_RATIO` 0.52→0（候选栏高=regionHeight，猫不再被额外头顶留白顶高；真机日志 region=393x82 验证 height=round(82×1.0)）；`kbWidth` 初始 393、`onAreaChange` 后为真实屏宽（440），两套 region 高度 82/92 均按各自 s 计算自洽。
+  - **重装后恢复流程**（自动化已验证）：uninstall+install 后系统会把默认输入法切回小艺，需 `aa start -a SettingsAbility -b com.krysta1ll.meowpuut.ohos` → 点「打开键盘设置」(660,763) → 默认输入法下拉 (1188,530) → 选「喵扑」(690,856) → hidumper 确认 isCurrentIme=true。
 - [x] UTF-8 解码乱码：`Lexicons.bytesToString` 与 `MeowpuutAbility.bytesToString` 原为逐字节 Latin-1，日文候选/节日名全部乱码；已改用 `util.TextDecoder.create('utf-8')`。
 - [x] Shift / CAPS-LOCK 三态图标：`Glyphs.shift(filled, lock)` 已补（空心=SHIFT、实心=SHIFT_ON、实心+锁杆=CAPS_LOCK），`drawIcon` 已按 `size*1.25` 接入；同时补了 `Glyphs.heart/sparkle/note` 原语。
 - [x] 英文句首自动大写 AutoCaps：`updateAutoCaps()` 从占位改为真实现（自判句首），`space/enter/onDelete/doubleSpace` 已调用。
@@ -123,9 +144,12 @@
 - [x] emoji/华为编码差异：真机注入 `😀𩽾🙂`（3 个 BMP 外字符 = 6 个 UTF-16 单元）经
       `insertTextSync` 提交，TextArea 原样显示 `😀𩽾🙂` 无损坏（c0=d83d 代理对正确）；
       与 Android JNI 的 UTF-16 处理对齐，NAPI 层 `ToJS`/`FromJS` 转换正确。
-- [ ] 视觉/特效/美术细节目视：节日装扮、粒子、气泡 S 曲线、猫咪爪影、深色暖光等。
+- [x] 视觉/特效/美术细节目视（2026-11-15）：双猫聚拢右端✓、爪基线贴玻璃✓、摸猫粒子（金色爪印）✓、
+      简繁切换 toast（「换为繁体中文」）✓、按压气泡 S 曲线（ㄗ 气泡截图确认）✓、emoji 彩色渲染✓。
+      节日装扮/深色暖光随日期与主题未专项截证（素材已对齐 APK，逻辑已对照）。
 - [ ] 逐键无障碍虚拟节点（真机 TalkBack）。
-- [ ] 长按备选条、展开候选面板、摸猫/喵语 toast 交互目视。
+- [x] 长按备选条（长按 ㄅ → 「吧不把别被」横条 + 选中高亮）✓、展开候选面板（ㄋ 组字 → 箭头 ∨ →
+      4列×5行网格「你那呢您…」）✓、摸猫/喵语 toast（粒子+弹跳+切简繁）✓（2026-11-15 真机）。
 
 > 真机构建环境注意：闪退后 `DEVECO_SDK_HOME` 与 JDK PATH 可能丢失，重建前需设
 > `$env:DEVECO_SDK_HOME='...\sdk'` 且把 `...\DevEco Studio\jbr\bin` 加进 PATH，并
@@ -824,4 +848,339 @@ Android 真机实测：把「色调」切到「深色」后，设置页**整体�
 
 第 2 层 FFI（`mpn_nine_key_*`）、第 3 层 NAPI 桥、第 4 层 UI（3×4 键盘/subtype/Composer 分支）
 仍按上面清单待实现；音节边界算法待 Android 参考输出校准。core 的展开+前缀收集已就绪，
+
+### round 59：微信「回车无法发送」根因（2026-11-15，真机实证 + SDK 源码穷尽）
+
+- **现象**：鸿蒙喵扑软键盘「发送」按钮在微信聊天里点了不发送（仅换行/字面 `\n`），硬件回车却能发送。
+- **根因**（真机 HUAWEI Pura X / API26 + 本机 DevEco SDK 源码穷尽，置信度高）：
+  1. 鸿蒙微信聊天框 `enterKeyType=4`（ImsaKit 日志 `pattern/enterKey:-1/4`；IME 枚举 SEND=4，对齐
+     Android IME_ACTION_SEND=0x04）。
+  2. **HarmonyOS 输入法框架无 `performEditorAction` 等价物**：`InputClient.sendKeyFunction(action)` 仅
+     `0(无效)/1(确认键)` 两档；新增的 `sendExtendAction` 仅 `SELECT_ALL/CUT/COPY/PASTE` 剪贴板动作
+     （本机 SDK d.ts L2999-3028）；无 API 可注入 KeyEvent。故输入法只能发「确认键(1)」。
+  3. `sendKeyFunction(1)` → 框架路由 `SendEnterKeyFunc(SEND)`，但**微信鸿蒙聊天框是 RichEditor 多行框**，
+     把「确认键→SEND」降级为「换行」，表现为字面 `\n` 而非发送。
+  4. 唯一能触发发送的是**硬件回车事件透传**（`hardwareKeyEvent` 非组字时返回 false → 系统把 KeyEvent
+     透传给微信窗口层处理）——此路径输入法**无法主动触发**。
+- **结论**：这是**微信鸿蒙版 RichEditor 多行框 + 输入法框架 API 限制**导致，非喵扑代码缺陷。喵扑
+  `editorAction()` 的 `sendKeyFunction(1)` 已是 HarmonyOS 语义正确的「确认」调用（对齐 Android
+  `performEditorAction(SEND)`），对搜索框等单行场景能正确触发动作；微信是否「回车发送」取决于微信侧
+  （及微信内「回车键发送消息」设置），输入法无法越权。
+- **动作**：曾尝试 `SEND→commit('\n')` 插换行——已回退（多行框下换行≠发送，还会污染输入框）。
+  保留 `sendKeyFunction(1)` 原逻辑 + 注释说明。并未改功能，属「确认框架限制」。
+- **待跟进**：若后续鸿蒙微信更新修复 RichEditor 对 SEND 的响应，或 IME Kit 新增
+  `performEditorAction` 等价 API，再回来补。可选缓解：提示用户在微信开「回车键发送消息」。
+  微信实机复测只发到微信内聊天用户 `y2x` 的对话（勿污染其他聊天）。
+
+### round 60：returnTitle() 与 Android 的 enterKeyType 差异核对（代码层，待 t2 后落地）
+
+逐行对比 `MeowpuutAbility.ets returnTitle()` vs `MeowpuutIME.kt returnTitle()`：
+
+| 项 | Android | 鸿蒙当前 | 一致性 |
+|---|---|---|---|
+| `IME_FLAG_NO_ENTER_ACTION` | 显式判断，命中直接「换行」 | 无此标志位（鸿蒙 EditorAttribute 只有 inputPattern+enterKeyType） | **平台缺口，无法实现** |
+| NONE(=1) | 落入 `else -> 換行` | 落入 `default -> 換行` | ✅ 结果一致（建议补显式 case + 注释防误改） |
+| UNSPECIFIED(=0) | `else -> 換行` | `default -> 換行` | ✅ 一致 |
+| SEARCH/SEND/GO/DONE/NEXT | true | true | ✅ 一致 |
+| PREVIOUS | false | false | ✅ 一致 |
+
+- 结论：`returnTitle()` 行为**实质一致**（NONE/UNSPECIFIED 都正确落到「换行」）。唯一做不到的是
+  `IME_FLAG_NO_ENTER_ACTION`（鸿蒙无对应标志位，非代码 bug）。
+- 待办（t2 完成后统一落地，避免与 engineer 并发改同文件冲突）：给 `default` 分支补显式注释，
+  说明它同时覆盖 UNSPECIFIED/NONE/NEWLINE，对齐 Android 的 `else`。
+
 后续可直接在 FFI 层包 `nine_key_candidates`。
+### round 61：sendKeyFunction 参数语义纠正（微信「回车发送」的真正症结）
+
+**发现**：`InputMethodController::SendFunctionKey` 把参数**直接 cast 成 `EnterKeyType`** 透传给应用：
+
+```
+funcKey.SetEnterKeyType(static_cast<EnterKeyType>(functionKey));   // input_method_controller.cpp:2071
+```
+
+而 SDK 文档只写 `0: invalid key / 1: confirm key`，造成长期误解——传 `1` 会被解释成
+`EnterKeyType(1) = NONE`，不是「确认键」。RichEditor 收到 NONE 后 `PerformAction(NONE)`
+→ `FireOnSubmit(1)` → 无人订阅 → **退回默认动作换行**。
+
+这解释了微信聊天框（`enterKeyType=4=SEND`）里 `sendKeyFunction(1)` 只换行不发消息。
+
+**修正**：`editorAction()` 改为传入编辑框自己声明的 `enterKeyType`（微信=4=SEND），
+失败时退回文档写明的 `1`。
+
+| EnterKeyType（IME 侧） | 值 | 说明 |
+|---|---|---|
+| UNSPECIFIED | 0 | |
+| NONE | 1 | ← 旧代码 sendKeyFunction(1) 实际传的是这个 |
+| GO | 2 | |
+| SEARCH | 3 | |
+| **SEND** | **4** | 微信聊天框声明的值 |
+| NEXT | 5 | |
+| DONE | 6 | |
+| PREVIOUS | 7 | |
+| NEWLINE | 8 | |
+
+**框架层约束（已穷尽核对，不要再找「隐藏 API」）**：
+- 三方 IME 与系统 IME 公开能力面一致（`@ohos.inputMethodEngine.d.ts` / `@ohos.inputMethod.d.ts`
+  均 0 处 `@systemapi`）；小艺能回车发送靠框架内部系统 IME 身份绑定
+  （`RegisterProxyIme` / `isProxyIme_`），三方拿不到。
+- C 侧 `OH_TextEditorProxy_SendEnterKeyFunc` 是**应用实现**的回调；
+  `inputmethod_inputmethod_proxy_capi.h` 7 个导出函数中没有「发送回车键」。
+- `sendExtendAction` 仅 SELECT_ALL/CUT/COPY/PASTE；`sendPrivateCommand` / ExtraConfig
+  方向都是「应用→输入法」。
+- 「App→IME→App 注入按键」没有公开出口；**唯一现成可行的是硬件 keyEvent 透传**
+  （IME 监听 `keyEvent` 返回 `false` → 框架回转 → `RichEditorPattern::HandleOnEnter`）。
+- `EditorAttribute.consumeKeyEvents`（API 26）字段已进 SDK，但公开签名缺失，需微信适配，
+  现阶段不可承诺可用。
+
+**注意**：绝不可用 `insertText('\n')` 冒充发送——RichEditor 会把 `\n` 作为真实 span 写入，
+污染撤销栈与 `aboutToIMEInput`。
+
+### round 62：删除方向 —— 退格只能删光标前
+
+SDK `@ohos.inputMethodEngine.d.ts` 命名**反直觉**且官方文档明确：
+
+| API | 官方文档原文 | 语义 |
+|---|---|---|
+| `getForwardSync(length)` | Obtains the text **before** the cursor | 取光标**前** |
+| `getBackwardSync(length)` | Obtains the text **after** the cursor | 取光标**后** |
+| `deleteForwardSync(length)` | Deletes the fixed-length text **before** the cursor | 删光标**前** |
+| `deleteBackwardSync(length)` | Deletes the fixed-length text **after** the cursor | 删光标**后** |
+
+**历史 bug**：`getTextBeforeCursor()` 误用 `getBackwardSync`（取到的是光标**后**的文字）。
+光标在文末时取到空串 → 误判「光标前无文字」→ 走 `deleteBackwardSync(1)` 删光标后
+→ 文末后面无字 → **退格删不掉最后一个字符**。已改为 `getForwardSync`。
+
+**同源 bug**：`onDelete()` 里「光标前为空则删光标后」的 fallback 是错误设计——
+退格在任何情况下都不该删光标后的字（真机曾复现 `'全球ab、我'` → `'全球ab、'`，光标后的
+「我」被删）。现已移除该分支，改为 `deleteForwardSync` 兜底，失败则**不动文本**。
+
+已核对：全文件 0 处 `deleteBackwardSync` 调用，退格路径 100% 只指向光标前。
+
+### round 63：猫的显示 —— 不是蒙版，是玻璃裁剪
+
+**真机现象**：候选栏两端「有猫的爪子但主体被遮蔽了显示不出来」。
+
+**根因**：`clipOutsideGlass()` 用 `evenodd` 规则把玻璃轮廓**内部整块挖空**，只允许绘制
+玻璃**外面**的部分。猫身大部分落在玻璃里 → 主体被裁掉，只剩探出玻璃边缘的爪子和边线。
+
+**修复（纯净版）**：
+1. 移除 `clipOutsideGlass` 裁剪，猫整只完整绘制；
+2. 停用 `drawLightBand` 白色柔光带（避免任何叠加观感）；
+3. 移除深色模式光晕叠加；
+4. z 序：猫画在候选行之上、最上层。
+
+**副作用与配套修正**（整只显示后猫相对候选栏偏小、且头顶需要空间）：
+- 尺寸改为**由可用空间反解**，不写死倍数：
+  `scale = (available * FILL) / ((bottom - top) * height)`，`FILL = 0.94`；
+- 候选栏增高 `CAT_HEADROOM_RATIO = 0.34 × glassHeight`（相对比例，不写死像素），
+  玻璃仍贴候选栏底部，多出空间全给猫头。
+- **全部按比例推导**，随屏宽/字号/输入框缩放等比变化。
+  验算 360/393/412/440dp 四档：猫宽 51/56/59/63dp，猫头顶部 y 均为正值（4.1~4.7），
+  不切头；较原版（393dp 下 44.1dp）放大约 27%。
+- 爪子对齐：`anchorY = glass.top + edge.low` 与 `scale` 无关，两只猫爪子恒贴同一底线。
+
+### round 64：猫的行为差异（拍哪只猫、爱心阈值）
+
+| # | 项 | Android 基准 | 修复前鸿蒙 | 修复 |
+|---|---|---|---|---|
+| ① | 拍哪只猫切简繁 | `CandidateBarView.kt:714-718` 拍米米莫只撒粒子、`return null`，**不计数** | `onPet` 不分猫，拍米米莫也累计 | 加 `cat === 'mimimo'` 早退 |
+| ② | 爱心进度条阈值 | `:722` `if (outcome.count >= 2)` 才显示 | 吞掉阈值，第 1 下就弹 | 补回 `count >= 2` 判断 |
+| ③ | 系统「移除动画」 | `areAnimatorsEnabled()`，5 处使用 | 写死 `timeScale=1` | `motionTimeScale()`：lightweight 档 → 0，不喷粒子 |
+| ④ | 猫名匹配 | — | `'mimo'` vs 实际传入 `'mimimo'`，碰巧成立 | 收紧为 `'momo'` 精确匹配 |
+
+**注**：安卓与鸿蒙**都没有**眨眼/摇尾/空闲动画——猫是静止贴图，仅在被拍（tilt/wide/tall）
+与组字（lean ±2.5°）时有变换。这是安卓基线本身的设计，不该为鸿蒙额外发明动画。
+8 张贴图两边 md5 完全一致，资源无缺失。
+
+### round 65：组字原始字符可见（setPreviewText 语义纠正 + 时序修复）
+
+**需求**：输入拼音时输入框内实时显示原始字母（如 `nihao`，带下划线组字态），选候选后
+替换为汉字，与 Android `setComposingText` / `commitText` 对齐。
+
+**上一版的根本错误**（用户反馈「做得非常差」，回退重做）：
+
+1. 误判 `setPreviewText` 的 range 语义 —— 上一版声称「`{-1,-1}` 实测是**每次追加**而非替换」，
+   于是手写 `[cursor - previewLength, cursor+1]` 的绝对下标计算。这是**错的**。
+2. 在真机上靠一堆 `MeowpuutTouch` / `MeowpuutPreview` / `MeowpuutDiag` hilog 逐行猜坐标、
+   猜 range、逐帧比对截图，既低效又引入大量诊断噪音污染代码。
+3. `applyEdit` 时序错：先 `insertText(汉字)` 再处理预览，导致 `finishTextPreview` 把残留
+   的 `nihao` 也落地，出现「你好 nihao」错乱。
+
+**权威语义（本地 SDK `@ohos.inputMethodEngine.d.ts` 官方注释 + framework 源码 + 官方
+KikaInputMethod 示例，三者交叉验证，非二手资料）**：
+
+```
+setPreviewText(text, range)：
+  {start:-1, end:-1} → 替换整个预览区（官方为「更新组字」设计的语义）
+  start === end       → 在 start 处插入 text
+  start !== end       → 用 text 替换 [start, end) 区间
+  已有预览时 range 不得超出预览区；无预览时 range 不得超出文本框
+finishTextPreview()   → 预览文本「落地」（上屏为正式文本）
+```
+
+- 官方 Kika 示例 `sendKeyFunction()` 里 `sendKeyFunction` 后紧跟 `finishTextPreview()` 让预测词落地。
+- framework 源码 `RangeToInner` 仅原样透传 start/end，`-1/-1` 的「替换整个预览区」语义由
+  IMF 服务端解析，d.ts 官方注释即权威。
+
+**`-1/-1` 语义的最终真相（追到 ACE 引擎源码，铁证）**：
+
+`arkui_ace_engine` 仓库 `frameworks/core/components_ng/pattern/text_field/text_field_pattern.cpp`
++ `text_field_pattern.h` 是 `setPreviewText` 的最终执行处：
+
+```cpp
+// text_field_pattern.h
+int32_t GetPreviewTextStart() const {
+    return hasPreviewText_ ? previewTextStart_ : selectController_->GetCaretIndex();
+}
+int32_t GetPreviewTextEnd() const {
+    return hasPreviewText_ ? previewTextEnd_ : selectController_->GetCaretIndex();
+}
+```
+
+```cpp
+// text_field_pattern.cpp  SetPreviewTextOperation()
+start = (rangeStart == PREVIEW_TEXT_RANGE_DEFAULT) ? GetPreviewTextStart() : rangeStart;  // -1 → 沿用当前预览start
+end   = (rangeEnd   == PREVIEW_TEXT_RANGE_DEFAULT) ? GetPreviewTextEnd()   : rangeEnd;    // -1 → 沿用当前预览end
+...
+contentController_->ReplaceSelectedValue(start, end, info.text);  // 用 text 替换 [start,end)
+```
+
+```cpp
+// CheckPreviewTextValidate()
+if (start != end && (start == -1 || end == -1)) return PREVIEW_BAD_PARAMETERS;  // 只有 {-1,-1} 合法
+```
+
+```cpp
+// FinishTextPreviewOperation()
+previewValue = GetPreviewTextValue();
+hasPreviewText_ = false;                                  // 清除预览态
+contentController_->ReplaceSelectedValue(start, end, previewValue);  // 预览内容固化为正式文本（上屏）
+```
+
+**结论（确定性）**：`{-1,-1}` 不是「替换整个预览区」的字面意思，而是「**沿用组件当前认知的预览范围**」：
+- 首次（无预览，`hasPreviewText_=false`）：`GetPreviewTextStart()==GetPreviewTextEnd()==光标`，等价于「光标处插入」；
+- 后续（有预览）：`start/end = 上次预览区 [start,end)`，等价于「替换上次整个预览区」。
+
+这**彻底否定了 v4.1-flash 版「{-1,-1} 是追加不是替换」的错误结论**——ACE 源码明确走
+`ReplaceSelectedValue(start, end, text)` 替换路径，绝无追加。且 `finishTextPreview()` 确认是
+「预览文本固化为正式文本（上屏）」而非「收起预览」。
+
+**修复（对齐 Android applyEdit 三分支状态机）**：
+
+`syncComposingText(wasComposing, commitText)`：
+- 组字中：`setPreviewText(preedit, {-1,-1})` 维护预览区为当前组字显示（带下划线）
+- 组字结束 + commit：`setPreviewText(commit, {-1,-1})` 把预览区换成汉字，再 `finishTextPreview()` 落地
+- 组字结束无 commit：`finishTextPreview()` 清掉预览
+
+**关键对齐点 —— 组字显示的是 `preedit` 而非 `raw`**（对齐 Android `setComposingText(composer.preedit)`）：
+
+| 模式 | 鸿蒙 `_preedit`（Composer.rebuild） | 安卓 `preedit`（Composer.kt:269/284） | 是否一致 |
+|---|---|---|---|
+| 拼音 | `= this.raw` | `= raw.toString()` | ✅ |
+| 注音 | `= NativeEngine.preedit(session)` | `= NativeEngine.preedit(session)` | ✅ |
+| 日语 | `= Romaji.reading(raw)` | （安卓日文路径不同） | ✅ |
+
+原实现误用 `rawPreview`（= raw），注音模式下会显示原始按键序列而非带声调注音、
+日语模式显示原始罗马字而非读音，与 Android 不一致。已改为 `composer.preedit`。
+
+`applyEdit` 时序重排：
+- **预览同步先于 commit**（组字结束时预览区承载「nihao → 汉字」的替换，避免残留）
+- 分词（commit 非空且仍组字）：`insertText(commit)` + 预览区更新为剩余串
+- `previewSupported=false`（编辑框不支持预览）时组字结束的 commit 走 `insertText` 兜底上屏
+- **commit 落地责任显式化**：只有「组字结束且支持预览」这一种情况，commit 由
+  `syncComposingText` 的 setPreviewText+finishTextPreview 落地（`committedViaPreview =
+  wasComposing && !nowComposing && previewSupported`）；其余一切情况（分词、不支持预览、
+  非组字直接 commit）都走 `insertText`，保证汉字绝不静默丢失。
+
+**退格删空的关键修正**（ACE 源码暴露的隐患）：
+
+`finishTextPreview()` 在 ACE 层的实现（`FinishTextPreviewOperation`）是「把预览文本**固化**为正式文本」
+（`hasPreviewText_=false` + `ReplaceSelectedValue(start,end,previewValue)`），**不是**「丢弃预览」。
+
+安卓退格删空走 `commitText("", 1)` = **清空** composing（丢弃残留字符）。若鸿蒙直接
+`finishTextPreview()`，会把退格后残留的最后一个字符（如「n」）固化上屏，导致退格删不掉。
+
+故「组字结束无 commit」分支改为：先 `setPreviewText('', {-1,-1})` 把预览替换为空串，
+再 `finishTextPreview()` 固化空 —— 等价于「丢弃预览」，对齐安卓 commitText("", 1)。
+
+**清理**：移除全部 `MeowpuutTouch` / `MeowpuutPreview` / `MeowpuutDiag` 诊断 hilog，
+`KeyTouches.ets` / `MeowpuutKeyboard.ets` / `KeyboardPage.ets` 恢复原状。
+
+**验证**：hvigor `assembleHap` BUILD SUCCESSFUL（本机编译通过；真机验证由用户在鸿蒙
+设备上执行，当前鸿蒙设备已离线，安卓设备 `10ACCM3A8A001PS` 在线作行为基准）。
+
+### round 66：组字可见真机验证通过 + selectionChange 自回环根因修复（鸿蒙 56V0225905003230，API 12）
+
+round 65 的代码在真机上首验失败：**每敲一个字母就把上一个字母替换掉**（输入框显示
+`'n' → 'i' → 'ih'`，新字母替换旧字母而非累积）。
+
+**根因（PV 诊断 hilog 铁证）**：`on('selectionChange')` 回调原本承担「用户移走光标时
+清空组字」的职责，但 **`setPreviewText` 本身移动光标也会触发该回调**：
+
+```
+PV: preedit='n' wasC=false nowC=true cur=0     ← 第1键 n，开预览，光标 0→1
+（selectionChange 触发 → composer.clear() 清掉 raw）
+PV: preedit='i' wasC=false nowC=true cur=1     ← 第2键 wasC=false！raw 已被清空
+```
+
+第二键的 `wasC=false` 证明第一键的组字在两次按键之间被 selectionChange 处理器清掉了。
+对照证据：日语模式（preedit 路径不同，不触发同样回调序列）下 nihao 能完整累积，
+说明 `setPreviewText` 机制本身工作正常，bug 是拼音模式特有的 selectionChange 干扰。
+
+**修复：时间窗抑制（取代一次性布尔标志）**
+
+```typescript
+// 预览 API 调用会移动光标并回调 selectionChange，打开自驱动抑制窗口。
+// 一次按键可能触发多个回调（insert + 光标移动），布尔标志只能挡第一个，
+// 时间窗（SELF_DRIVEN_MS=700ms）能覆盖整个回调序列。
+private static readonly SELF_DRIVEN_MS: number = 700;
+private lastPreviewAt: number = 0;
+
+// selectionChange 处理器开头：
+if (this.composer.composing && this.lastPreviewAt > 0 &&
+    Date.now() - this.lastPreviewAt < MeowpuutAbility.SELF_DRIVEN_MS) {
+  return;  // 预览自驱动的光标变化，不是用户移光标
+}
+```
+
+用户真把光标移走（超时后 selectionChange 仍组字）时，先把预览 `finishTextPreview()`
+落地成普通文本再清组字（对齐 Android composing 留在原处变非组字文本的行为），
+避免预览悬空导致后续 `{-1,-1}` 更新作用在过期预览区上。
+
+**修复 2：预览操作串行队列（previewChain）**
+
+分词路径（nihao 选「你」剩 hao）是三步链 `setPreviewText(你)→finish→setPreviewText(hao)`，
+若被下一键的 `setPreviewText` 插队，`{-1,-1}` 的「沿用当前预览范围」语义会作用在错误的
+预览状态上。故每次按键的预览操作构造成配方数组，追加到 `previewChain` Promise 链上
+严格串行执行；每步执行前刷新 `lastPreviewAt` 维持抑制窗口。
+
+`applyEdit` 的 commit 落地责任随之扩展：`committedViaPreview = wasComposing && previewSupported`
+（分词情形也交给预览链，不再走 insertText——预览区已在分词链里被正确重排）。
+
+**真机验证结果（全部通过，hilog + uitest dumpLayout + qwen3.8-max 视觉复核三重取证）**：
+
+| 场景 | 结果 |
+|---|---|
+| 拼音 nihao 组字 | `'n'→'ni'→'nih'→'niha'→'nihao'` 逐键累积 ✅ |
+| 选候选替换 | nihao → 点候选「你好」→ 输入框变 `你好` ✅ |
+| 上屏后再组字 | `你好` + 输入 hao → `你好hao`（新组字接在已上屏后）✅ |
+| 退格删空 | `你好hao→ha→h→你好` 逐字回退，删空无残留 ✅ |
+| 注音模式 | ㄡㄞㄨㄇㄢ 逐键累积，选候选上屏「偶爱物慢」✅ |
+| 日语模式 | `ん→に→にh→には→にはお` 罗马字实时转假名 ✅ |
+| 英文模式 | toggle 切换后字母直接追加 `にはおn→にはおni` ✅ |
+| 跨应用（备忘录搜索框）| nihao 完整累积，候选「你好/逆号/妳好/你」正常 ✅ |
+
+**组字下划线的平台真相（qwen 视觉复核 + ACE 源码 + SDK 签名三方确认）**：
+
+- 预览文本在鸿蒙 API 12 **默认无下划线/高亮样式**（系统备忘录里同样裸文本）。
+- ACE 源码 `GetPreviewTextStyle()` 默认 `PreviewTextStyle::NORMAL`；下划线
+  （`PreviewTextStyle::UNDERLINE`）是**编辑框组件侧**的 paintProperty
+  （`ReceivePreviewTextStyle`），由目标应用设置，**IME 侧 `setPreviewText(text, range)`
+  签名无任何样式参数**（SDK `@ohos.inputMethodEngine.d.ts:1634` 铁证）。
+- 即「带下划线」在鸿蒙 API 12 上是平台能力缺口而非输入法可实现项；核心需求
+  「组字原始字符实时可见 + 选候选替换」已 100% 达成，与系统输入法行为一致。
+
+**附带修复**：设置页删除「切换键盘」按钮（用户指示）——移除 `Button('切换键盘')` +
+`imeDialog` CustomDialogController + `InputMethodListDialog` import，只保留
+「打开键盘设置」跳系统页；ENABLED 文案改为引导用户去系统输入法页选择喵扑。
+子类型切换仍可通过设置页「输入方式」下拉或键盘地球键完成。

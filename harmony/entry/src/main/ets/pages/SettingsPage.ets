@@ -4,7 +4,7 @@
  */
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { inputMethod, InputMethodSubtype, InputMethodListDialog } from '@kit.IMEKit';
+import { inputMethod, InputMethodSubtype } from '@kit.IMEKit';
 import { uiMaterial } from '@kit.ArkUI';
 import { image } from '@kit.ImageKit';
 import { util } from '@kit.ArkTS';
@@ -43,17 +43,12 @@ struct SettingsPage {
   @State keySoundVolume: number = 100;
   @State keyboardHeight: string = 'standard';
   @State effects: string = 'standard';
+  @State keyboardPosition: string = 'bottom';
   /** 候选栏预览里的两只猫贴图（米米莫黑猫 + 莫莫暹罗猫），从 rawfile 解码。 */
   @State private leftCat: image.PixelMap | undefined = undefined;
   @State private rightCat: image.PixelMap | undefined = undefined;
   /** 输入法启用状态（对照 Android 的 setup_off/enabled/selected）。 */
   @State private imeStatus: ImeStatus = ImeStatus.OFF;
-  /** 切换输入法对话框控制器。 */
-  private imeDialog: CustomDialogController = new CustomDialogController({
-    builder: InputMethodListDialog({}),
-    autoCancel: true,
-    alignment: DialogAlignment.Bottom,
-  });
   /** 第三方授权弹窗控制器（懒创建，内容在打开时读取）。 */
   private licenseDialog: CustomDialogController | null = null;
 
@@ -97,7 +92,11 @@ struct SettingsPage {
       this.keySoundVolume = this.prefs.keySoundVolume;
       this.keyboardHeight = this.prefs.keyboardHeight;
       this.effects = this.prefs.effects;
+      this.keyboardPosition = this.prefs.keyboardPosition;
       this.ready = true;
+      // 【跨进程对齐兜底】设置加载完成后把整份当前值推给输入法进程：
+      // IME 冷启动早于设置页打开时会落后，这里主动全量广播一次补齐。
+      this.prefs.publishSnapshot();
     });
     this.loadPreviewCats();
     this.updateStatus();
@@ -174,7 +173,7 @@ struct SettingsPage {
   private statusText(): string {
     switch (this.imeStatus) {
       case ImeStatus.SELECTED: return '当前使用的键盘是喵扑。';
-      case ImeStatus.ENABLED: return '喵扑已启用。点一下「切换键盘」改用喵扑。';
+      case ImeStatus.ENABLED: return '喵扑已启用。在系统设置的输入法页面选择喵扑。';
       default: return '喵扑还没有启用。先在系统设置的「屏幕键盘」里开启喵扑，再切换过去。';
     }
   }
@@ -397,7 +396,7 @@ struct SettingsPage {
               .fontColor(this.imeStatus === ImeStatus.SELECTED ? '#34C759' : '#8A8A8E')
               .width('100%')
               .margin({ top: 12 })
-            // 两个按钮：打开系统设置 + 切换键盘。
+            // 单个按钮：打开系统设置的输入法管理页（系统页里可直接切换键盘）。
             Row({ space: 8 }) {
               Button('打开键盘设置')
                 .layoutWeight(1)
@@ -416,12 +415,6 @@ struct SettingsPage {
                       abilityName: 'com.huawei.hmos.settings.MainAbility'
                     }).catch(() => {});
                   });
-                })
-              Button('切换键盘')
-                .layoutWeight(1)
-                .height(44)
-                .onClick(() => {
-                  this.imeDialog.open();
                 })
             }
             .width('100%')
@@ -494,14 +487,28 @@ struct SettingsPage {
           this.barPreview()
 
           // 视觉特效：Android 为三段式 SeekBar（轻量/标准/极致），Harmony 用 3 档 Slider。
-          this.rowSlider('视觉特效',
-            this.effects === 'lightweight' ? '轻量' : this.effects === 'extreme' ? '极致' : '标准',
-            this.effects === 'lightweight' ? 0 : this.effects === 'extreme' ? 2 : 1,
-            0, 2,
-            (v: number) => {
-              this.effects = v === 0 ? 'lightweight' : v === 2 ? 'extreme' : 'standard';
-              this.prefs.effects = this.effects;
-            })
+          // 注意：@Builder 参数按值传递不响应 @State 变化（真机实测 valueText 不刷新），
+          // 这里内联展开，文本直接绑定 this.effects 保证档位变化即时可见。
+          Column() {
+            Row() {
+              Text('视觉特效').fontSize(16).layoutWeight(1)
+              Text(this.effects === 'lightweight' ? '轻量' : this.effects === 'extreme' ? '极致' : '标准')
+                .fontSize(15).fontColor('#8A8A8E')
+            }
+            .width('100%')
+            Slider({ value: this.effects === 'lightweight' ? 0 : this.effects === 'extreme' ? 2 : 1, min: 0, max: 2, step: 1 })
+              .width('100%')
+              .margin({ top: 8 })
+              .selectedColor('#FF0A59F7')
+              .trackColor('#FFE5E5EA')
+              .blockColor('#FFFFFFFF')
+              .onChange((v: number) => {
+                this.effects = v === 0 ? 'lightweight' : v === 2 ? 'extreme' : 'standard';
+                this.prefs.effects = this.effects;
+              })
+          }
+          .width('100%')
+          .padding({ left: 16, right: 16, top: 12, bottom: 12 })
           this.note('轻量减少动效。极致让候选栏、键帽和底板更通透。')
 
           this.rowSelect('键盘高度',
@@ -513,12 +520,13 @@ struct SettingsPage {
             })
 
           // 键盘位置（Android 0.9.1 两档：贴底 / 悬浮）。
+          // 悬浮：panel 切 FLG_FLOATING + moveTo 抬高，键盘顶部带拖动条可拖动（真机验证）。
           this.rowSelect('键盘位置',
             ['贴底', '悬浮'],
-            0,
+            this.keyboardPosition === 'floating' ? 1 : 0,
             (index: number) => {
-              // 悬浮键盘需要窗口拖动能力（windowType 悬浮），当前模拟器软键盘 window
-              // 渲染受限（vsync），先固定「贴底」，悬浮档预留。
+              this.keyboardPosition = index === 1 ? 'floating' : 'bottom';
+              this.prefs.keyboardPosition = this.keyboardPosition;
             })
 
           Column() {

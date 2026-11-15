@@ -56,6 +56,8 @@ export interface KeyboardCallbacks {
   onPunctuation(mark: string): void;
   onToggleExpanded(): void;
   onPet(cat: string): void;
+  /** 【悬浮键盘】拖动把手：把面板移动 (dx,dy) 像素。 */
+  onDragPanel(dx: number, dy: number): void;
 }
 
 /** 键盘状态由 ability 写入，页面读取后渲染。 */
@@ -69,6 +71,8 @@ export class KeyboardHost {
 
   callbacks: KeyboardCallbacks | null = null;
   resourceManager: resourceManager.ResourceManager | null = null;
+  /** 悬浮键盘显示拖动把手（ability 在切悬浮态时置 true）。 */
+  draggable: boolean = false;
   private state: KeyboardState | null = null;
   private refreshToken: number = 0;
   private resetFlag: boolean = false;

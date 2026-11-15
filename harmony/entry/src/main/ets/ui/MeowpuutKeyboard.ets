@@ -19,6 +19,8 @@ import { image } from '@kit.ImageKit';
 import { display } from '@kit.ArkUI';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { accessibility } from '@kit.AccessibilityKit';
+import { resourceManager } from '@kit.LocalizationKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 
 export class KeyboardState {
   keyboard: Look;
@@ -253,6 +255,17 @@ export struct MeowpuutKeyboard {
   private toastStart: number = 0;
   /** 摸猫进度爱心数（-1 = 无进度爱心，画单颗大爱心/不画）。 */
   private toastHearts: number = -1;
+  /** 【iOS 风格增强】候选选中胶囊的滑动动画（segmented-control 式平滑过渡）。 */
+  private pillFromX: number = -1;   // 动画起点（选中项内容坐标 x），-1 = 无动画
+  private pillFromW: number = 0;
+  private pillToX: number = -1;     // 目标（同上）
+  private pillToW: number = 0;
+  private pillAnimStart: number = 0;
+  /** 上一帧实画的胶囊位置（内容坐标）；-1 = 还没画过。 */
+  private pillDrawnX: number = -1;
+  private pillDrawnW: number = 0;
+  private static readonly PILL_SLIDE_MS = 240;
+
   /** 摸猫提示是否 emphasis（简繁切换成功的醒目强调）。 */
   private toastEmphasis: boolean = false;
   /**
@@ -314,36 +327,69 @@ export struct MeowpuutKeyboard {
     this.loadCatSprites();
   }
 
-  /** 把 8 张猫贴图从 rawfile 解码成 PixelMap，供 drawCats 直接 drawImage。 */
+  /**
+   * 把 8 张猫贴图从 rawfile 解码成 PixelMap，供 drawCats 直接 drawImage。
+   *
+   * 重做要点（此前猫完全画不出来，真机像素分析证实候选栏两端无任何猫像素）：
+   *  1. 逐张加载，用 await 串行等待每个 decode 完成，不再依赖「remaining 计数 + 静默 catch」；
+   *  2. 每一张都打 hilog（成功/失败 + 失败原因），杜绝「没图也查不出原因」；
+   *  3. resourceManager 兜底：KeyboardHost 未注入时回退到 Ability 上下文；
+   *  4. 失败后允许重试（catsLoading 不会永久卡 true），并有一次性延迟重试。
+   */
   private loadCatSprites(): void {
     if (this.catsLoading) return;
+    if (this.catPixels.size > 0) return; // 已加载过
     this.catsLoading = true;
     const names = [
       'mimimo_edge_rest', 'mimimo_edge_peek', 'mimimo_edge_lounge', 'mimimo_side_hold',
       'momo_edge_rest', 'momo_edge_peek', 'momo_edge_lounge', 'momo_side_hold',
     ];
     const rm = KeyboardHost.get().resourceManager;
-    if (rm === null) { this.catsLoading = false; return; }
-    let remaining = names.length;
+    if (rm === null) {
+      hilog.error(0x0000, 'MeowpuutCat', 'loadCatSprites: resourceManager is null, defer retry');
+      this.catsLoading = false;
+      // 面板刚创建时 host 可能尚未注入 resourceManager，延迟重试一次。
+      setTimeout(() => { this.loadCatSprites(); }, 300);
+      return;
+    }
+    this.decodeCats(rm, names).then((ok: number) => {
+      this.catsLoading = false;
+      hilog.info(0x0000, 'MeowpuutCat', `loadCatSprites done: ${ok}/${names.length} decoded`);
+      if (ok > 0) this.drawTick++;
+    }).catch((e: BusinessError) => {
+      this.catsLoading = false;
+      hilog.error(0x0000, 'MeowpuutCat', `loadCatSprites failed: ${e.code} ${e.message}`);
+    });
+  }
+
+  /** 串行解码全部猫贴图，返回成功张数。失败逐张记录原因。 */
+  private async decodeCats(rm: resourceManager.ResourceManager, names: string[]): Promise<number> {
+    let ok = 0;
     for (const name of names) {
       try {
         const bytes = rm.getRawFileContentSync(`cats/${name}.png`);
+        hilog.info(0x0000, 'MeowpuutCat', `${name}: raw ${bytes.length} bytes`);
         const source = image.createImageSource(bytes.buffer as ArrayBuffer);
-        source.createPixelMap((err: BusinessError, pm: image.PixelMap) => {
-          remaining--;
-          if (err === undefined && pm !== undefined) {
-            this.catPixels.set(name, pm);
-          }
-          if (remaining <= 0) {
-            this.catsLoading = false;
-            this.drawTick++;
-          }
-        });
+        if (source === undefined) {
+          hilog.error(0x0000, 'MeowpuutCat', `${name}: createImageSource returned undefined`);
+          continue;
+        }
+        const pm = await source.createPixelMap();
+        if (pm !== undefined) {
+          this.catPixels.set(name, pm);
+          ok++;
+          const info = source.getImageInfoSync();
+          hilog.info(0x0000, 'MeowpuutCat', `${name}: ok ${info.size.width}x${info.size.height}`);
+        } else {
+          hilog.error(0x0000, 'MeowpuutCat', `${name}: createPixelMap returned undefined`);
+        }
+        source.release();
       } catch (e) {
-        remaining--;
-        if (remaining <= 0) { this.catsLoading = false; }
+        const be = e as BusinessError;
+        hilog.error(0x0000, 'MeowpuutCat', `${name}: ${be.code} ${be.message}`);
       }
     }
+    return ok;
   }
 
   /** 按名取猫/节日贴图：先日常猫，再节日换装猫。 */
@@ -422,7 +468,8 @@ export struct MeowpuutKeyboard {
       // 持续推进 lean 动画与粒子，并让活跃中的短动画持续重绘。
       this.stepLean();
       this.stepParticles();
-      if (this.lean !== this.leanTo || this.particles.length > 0 || Date.now() < this.toastExpires) {
+      if (this.lean !== this.leanTo || this.particles.length > 0 || Date.now() < this.toastExpires ||
+        Date.now() < this.pillAnimStart + MeowpuutKeyboard.PILL_SLIDE_MS) {
         this.drawTick++;
       }
     }, 16);
@@ -463,8 +510,44 @@ export struct MeowpuutKeyboard {
     }
   }
 
+  /**
+   * 【iOS 风格】选中胶囊滑动插值。toX 是本次的目标（内容坐标），
+   * 返回 [插值x, 插值w]；动画未激活返回 null。
+   * 触发时机：上次绘制的胶囊位置有效、且与本次目标都来自「候选列表态」
+   * （同为 kind=0 的选中项）时，从上次实画位置滑到新位置。
+   */
+  private pillSlideX(toX: number, toW: number): [number, number] | null {
+    const now = Date.now();
+    const animating = now < this.pillAnimStart + MeowpuutKeyboard.PILL_SLIDE_MS;
+    let fromX = this.pillDrawnX;   // 上一次实画的 x（可能本身就是插值帧）
+    let fromW = this.pillDrawnW;
+    if (!animating) {
+      if (fromX < 0 || Math.abs(toX - fromX) > this.kbWidth) {
+        // 首次出现 / 列表大变（新组字）：不滑，直接就位。
+        this.pillDrawnX = toX; this.pillDrawnW = toW;
+        this.pillToX = toX; this.pillToW = toW;
+        this.pillAnimStart = 0;
+        return null;
+      }
+      if (Math.abs(toX - fromX) < 0.5 && Math.abs(toW - fromW) < 0.5) {
+        this.pillDrawnX = toX; this.pillDrawnW = toW;
+        return null;
+      }
+      // 启动新滑动
+      this.pillFromX = fromX; this.pillFromW = fromW;
+      this.pillToX = toX; this.pillToW = toW;
+      this.pillAnimStart = now;
+    }
+    const t = Math.min(1, (now - this.pillAnimStart) / MeowpuutKeyboard.PILL_SLIDE_MS);
+    const ease = 1 - Math.pow(1 - t, 3);   // easeOutCubic
+    const x = this.pillFromX + (this.pillToX - this.pillFromX) * ease;
+    const w = this.pillFromW + (this.pillToW - this.pillFromW) * ease;
+    this.pillDrawnX = x; this.pillDrawnW = w;
+    return [x, w];
+  }
+
   committed(): void {
-    this.motions.set('mimimo', new CatMotion(Cat.MIMIMO, Date.now(), 1));
+    this.motions.set('mimimo', new CatMotion(Cat.MIMIMO, Date.now(), this.motionTimeScale()));
   }
 
   /** drawTick 变了就重画。Canvas 的绘制指令不会因为 @State 变化自己重放。 */
@@ -473,10 +556,22 @@ export struct MeowpuutKeyboard {
     this.drawKeys();
   }
 
+  /**
+   * 动效时长时间缩放（对照 Android CandidateBarView.kt:760-764 的 timeScale()）：
+   * Android 读系统 Settings.Global.ANIMATOR_DURATION_SCALE，鸿蒙该常量 API21 已废弃且无现代等价，
+   * 改用应用内 effects 档位代理——lightweight（轻量/减少动效）→ 0（瞬时完成），其余 → 1。
+   */
+  private motionTimeScale(): number {
+    return this.state.keyboard.effects === 'lightweight' ? 0 : 1;
+  }
+
   /** 播放摸猫动作并显示提示；简繁切换的计数与状态由 ability 负责。 */
   pet(catName: string, toast: string, hearts: number = -1): void {
-    const cat = catName === 'mimo' || catName === 'momo' ? Cat.MOMO : Cat.MIMIMO;
-    this.motions.set(catName, new CatMotion(cat, Date.now(), 1));
+    // 猫名与 Cat 枚举严格对应：'mimimo'（黑猫 米米莫）/ 'momo'（橘猫 莫莫）。
+    // 注意不能用 'mimo' 之类近似匹配——onPet 派发用的就是 'mimimo'（见 pointer 命中处）。
+    const cat = catName === 'momo' ? Cat.MOMO : Cat.MIMIMO;
+    const timeScale = this.motionTimeScale();
+    this.motions.set(catName, new CatMotion(cat, Date.now(), timeScale));
     this.toastText = toast;
     this.toastHearts = hearts;
     this.toastEmphasis = hearts < 0 && toast.length > 0;
@@ -487,11 +582,14 @@ export struct MeowpuutKeyboard {
     if (toast.length > 0) this.announceAccessibility(toast);
     // 摸猫喷粒子（对照 Android CandidateBarView.pet）：
     // 米米莫喷爪/音符/星（金黄，向右），莫莫喷心（粉，向左）。
-    if (cat === Cat.MIMIMO) {
-      const kind = 1 + Math.floor(Math.random() * 3); // 1=paw 2=note 3=sparkle
-      this.emit(cat, kind, 10, (4 + Math.random() * 6), '#FFDBA83D');
-    } else {
-      this.emit(cat, 0, 9, -(4 + Math.random() * 6), '#FFF2738C');
+    // 轻量动效档位下不喷粒子（对照 Android motionEnabled 守卫）。
+    if (timeScale > 0) {
+      if (cat === Cat.MIMIMO) {
+        const kind = 1 + Math.floor(Math.random() * 3); // 1=paw 2=note 3=sparkle
+        this.emit(cat, kind, 10, (4 + Math.random() * 6), '#FFDBA83D');
+      } else {
+        this.emit(cat, 0, 9, -(4 + Math.random() * 6), '#FFF2738C');
+      }
     }
     this.drawTick++;
   }
@@ -579,6 +677,20 @@ export struct MeowpuutKeyboard {
     } catch (e) {
       // 取不到显示信息时按手机竖屏处理。
       return 800;
+    }
+  }
+
+  /**
+   * 屏幕像素密度（vp→px 倍数）。CanvasRenderingContext2D.drawImage 对 PixelMap 的
+   * 目标矩形按物理像素解释（真机实测：64vp 猫帧画出来只有 64px，恰为 1/density），
+   * 而路径/文字仍按 vp。所有 drawImage(PixelMap) 的目标坐标须乘该倍数折算。
+   */
+  private pxRatio(): number {
+    try {
+      const disp = display.getDefaultDisplaySync();
+      return disp.densityDPI / 160;
+    } catch (e) {
+      return 3;
     }
   }
 
@@ -708,35 +820,50 @@ export struct MeowpuutKeyboard {
       const x = change.x;
       const y = change.y;
 
-      // 1. 展开箭头优先（对应 Android CandidateBarView.kt:626-634 的排他判定）。
-      if (region.chevron !== null) {
-        const c = region.chevron;
+      // 1.【对齐 Android CandidateBarView.onTouchEvent 命中顺序】猫优先于箭头/候选行：
+      //   「A cat answers on its picture above the glass; the expand key and the
+      //    candidates keep what is theirs.」——先按座位 touch 框找猫，但点在箭头区
+      //   （y 在箭头上沿以下）或候选胶囊区（x 在行内且 y 在胶囊顶以下）时让位。
+      const chevron = region.chevron;
+      const onArrow = chevron !== null &&
+        x >= chevron.left - 6 && x <= chevron.left + chevron.width + 6;
+      const onRow = x >= region.row.left && x <= region.row.left + region.row.width;
+      const rowCenterY = region.row.top + region.row.height / 2;
+      const candidatesTop = rowCenterY - region.pillHeight / 2;
+      const seats = this.seats(region, look);
+      const stage = this.stage(region, look.shape);
+      let pet: CatPlacement | null = null;
+      for (const seat of seats) {
+        const t = seat.touch(stage);
+        if (x >= t.left && x < t.left + t.width && y >= t.top && y < t.top + t.height) {
+          const yields = (onArrow && chevron !== null && y >= chevron.top) ||
+            (onRow && y >= candidatesTop);
+          if (!yields) { pet = seat; break; }
+        }
+      }
+      if (pet !== null) {
+        const catName = pet.cat === Cat.MIMIMO ? 'mimimo' : 'momo';
+        this.pressedCat = catName;
+        this.pressedCats.add(catName);
+        this.drawTick++;
+        this.onPetEvt?.(catName);
+        return;
+      }
+
+      // 2. 展开箭头（对应 Android CandidateBarView.kt:626-634 的排他判定）。
+      if (chevron !== null) {
+        const c = chevron;
         if (x >= c.left && x < c.left + c.width && y >= c.top && y < c.top + c.height) {
           this.onToggleExpandedEvt?.();
           return;
         }
       }
 
-      // 2. 候选行。按下只是开始，抬手时才决定是点击还是拖动
+      // 3. 候选行。按下只是开始，抬手时才决定是点击还是拖动
       //    （候选多的时候要能横向拖，见 barPress/barMove/barRelease）。
       if (y >= region.row.top && y < region.row.top + region.row.height) {
         this.barPress(change.id, x, y);
         return;
-      }
-
-      // 3. 摸猫（与绘制用同一套 seats，节日换装猫也命中）。
-      const seats = this.seats(region, look);
-      const stage = this.stage(region, look.shape);
-      for (const seat of seats) {
-        const t = seat.touch(stage);
-        if (x >= t.left && x < t.left + t.width && y >= t.top && y < t.top + t.height) {
-          const catName = seat.cat === Cat.MIMIMO ? 'mimimo' : 'momo';
-          this.pressedCat = catName;
-          this.pressedCats.add(catName);
-          this.drawTick++;
-          this.onPetEvt?.(catName);
-          return;
-        }
       }
     }
   }
@@ -918,17 +1045,17 @@ export struct MeowpuutKeyboard {
       this.drawFestivalEnd(ctx, region, look);
     }
 
-    // 猫咪。
-    if (region.cats && look.cats) {
-      this.drawCats(ctx, region, look);
-    }
-
-    // 候选行左侧柔光带（对照 iOS CandidateRegionView L143-153）：
-    // 米米莫黑猫身上垫一条白色柔光，让候选深字可读，后 40% 淡出。
-    this.drawLightBand(ctx, region, look);
+    // 【纯净版】柔光带暂时停用：真机反馈它在候选栏上形成一块白斑观感。
+    // 先确认两只猫能完整、清晰地显示出来，之后再决定是否以更淡的方式恢复。
+    // this.drawLightBand(ctx, region, look);
 
     // 候选行。
     this.drawRow(ctx, region, look);
+
+    // 猫咪（最上层，完整绘制不被任何东西遮挡）。
+    if (region.cats && look.cats) {
+      this.drawCats(ctx, region, look);
+    }
 
     // 摸猫喷发的粒子（对照 Android drawParticles）。
     this.drawParticles(ctx, region, look);
@@ -969,8 +1096,10 @@ export struct MeowpuutKeyboard {
       const places = CatSeats.ends(stage, dressedMimimo, dressedMomo);
       if (places !== null) return places;
     }
-    const mimimo = CatSpriteData.get('mimimo_edge_peek')!;
-    const momo = CatSpriteData.get('momo_edge_peek')!;
+    // 【0.9.1 贴图选型】安卓 0.9.1 真机像素分析：日常状态米米莫用 lounge（趴卧，宽身）、
+    // 莫莫用 rest（正坐）。两猫等可见高、聚拢玻璃右端。旧版双双 edge_peek 随 0.9.1 废弃。
+    const mimimo = CatSpriteData.get('mimimo_edge_lounge')!;
+    const momo = CatSpriteData.get('momo_edge_rest')!;
     return CatSeats.ends(stage, mimimo, momo) ?? [];
   }
 
@@ -993,21 +1122,12 @@ export struct MeowpuutKeyboard {
         tall *= 0.93;
       }
       ctx.save();
-      // 只让玻璃以外的部分露出来，猫身下缘藏进玻璃轮廓里
-      // （对应 Android CandidateBarView.kt:381-386 的 clipOutPath）。
-      this.clipOutsideGlass(ctx, look, region);
+      // 【纯净版】不再裁剪玻璃内侧。此前 clipOutsideGlass 用 evenodd 把玻璃内部整块挖空，
+      // 导致猫身主体被裁掉、只剩探出玻璃边缘的爪子轮廓（真机反馈「只有爪子、主体显示不出来」）。
+      // 现在整只猫完整绘制在候选栏上，先确认贴图能正确显示，后续再按需恢复裁切。
       this.catTransform(ctx, seat, tilt, wide, tall);
       const pm = this.pixelFor(sprite.name);
       if (pm !== undefined) {
-        // 深色模式下黑猫会融进深色玻璃，先叠一圈暖色光晕把它托出来
-        // （对应 Android CandidateBarView.kt:323-343 的 glow()）。
-        if (look.dark && cat === 'mimimo') {
-          ctx.save();
-          ctx.shadowBlur = 2.2 * region.scale;
-          ctx.shadowColor = withAlpha('#FFEDD6', 0.6);
-          this.drawCatImage(ctx, pm, sprite, frame);
-          ctx.restore();
-        }
         this.drawCatImage(ctx, pm, sprite, frame);
       } else {
         // 贴图尚未解码时的降级占位，避免空白。
@@ -1059,13 +1179,24 @@ export struct MeowpuutKeyboard {
     ctx.save();
     roundRect(ctx, region.row.left, pillTop, span, region.pillHeight, region.pillHeight / 2);
     ctx.clip();
-    // 白 0.5，后 40% 线性淡出（对照 iOS mask: black 0 → black 0.6 → clear 1）。
-    const grad = ctx.createLinearGradient(region.row.left, 0, region.row.left + span, 0);
-    grad.addColorStop(0, '#80FFFFFF');
-    grad.addColorStop(0.6, '#80FFFFFF');
-    grad.addColorStop(1, '#00FFFFFF');
-    ctx.fillStyle = grad;
+    // 纵向渐变：中间亮、上下淡出，模拟玻璃高光而不是一块实心白条
+    // （鸿蒙 Canvas 无 iOS LiquidGlass 的真实高光材质，纯色 50% 白在玻璃上呈突兀白斑）。
+    const vgrad = ctx.createLinearGradient(0, pillTop, 0, pillTop + region.pillHeight);
+    vgrad.addColorStop(0, '#00FFFFFF');
+    vgrad.addColorStop(0.5, '#4DFFFFFF');   // 中心 30% 白
+    vgrad.addColorStop(1, '#00FFFFFF');
+    // 横向：前 60% 保持，后 40% 淡出（对照 iOS mask black 0 → black 0.6 → clear 1）。
+    const hgrad = ctx.createLinearGradient(region.row.left, 0, region.row.left + span, 0);
+    hgrad.addColorStop(0, '#FFFFFFFF');
+    hgrad.addColorStop(0.6, '#FFFFFFFF');
+    hgrad.addColorStop(1, '#00FFFFFF');
+    ctx.fillStyle = vgrad;
     ctx.fillRect(region.row.left, pillTop, span, region.pillHeight);
+    // 用横向渐变做二次遮罩效果：在右 40% 上覆盖一层背景色的反向渐变以淡出。
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.fillStyle = hgrad;
+    ctx.fillRect(region.row.left, pillTop, span, region.pillHeight);
+    ctx.globalCompositeOperation = 'source-over';
     ctx.restore();
   }
 
@@ -1159,16 +1290,20 @@ export struct MeowpuutKeyboard {
   /** 猫贴图整图缩放到 frame（与 Android drawBitmap(bitmap, null, frame) 对齐）。
    *
    * 注意：rawfile 的猫 PNG 是 @3x 实际像素（peek=192×192），sprite.width/height 与 frame 是 1x 逻辑
-   * vp（64×64）。Canvas drawImage 目标矩形单位是 vp；为避免 Canvas 对 PixelMap 隐式缩放语义在不同
-   * 版本/窗口下不一致，这里用 9 参重载显式把「整张物理像素源」映射到「逻辑 vp frame」，即
-   * 等价于 Android drawBitmap(整图, null, frame)。
+   * vp（64×64）。真机验证（API 12+，Pura X / density 3.0）：
+   *   - dest.x / dest.y 按 vp 坐标解释（与路径/文字一致，随画布拉伸）；
+   *   - dest.width / dest.height 却按物理像素 1:1 解释（不随画布拉伸）。
+   * 因此宽度/高度必须乘 pxRatio 折算回物理像素才能得到 vp 语义的大小；
+   * 左上角坐标保持 vp 原值（乘了反而飞出画布——这正是「猫消失只剩爪影」的根因）。
    */
   private drawCatImage(ctx: CanvasRenderingContext2D, pm: image.PixelMap,
     sprite: CatSprite, frame: Box): void {
     const info = pm.getImageInfoSync();
     const sw = info.size.width;   // 物理像素，如 192
     const sh = info.size.height;
-    ctx.drawImage(pm, 0, 0, sw, sh, frame.left, frame.top, frame.width, frame.height);
+    const k = this.pxRatio();
+    ctx.drawImage(pm, 0, 0, sw, sh,
+      frame.left, frame.top, frame.width * k, frame.height * k);
   }
 
   /** 节日右端饰簇（对照 Android drawFestivalEnd）：玻璃上、猫与候选下。 */
@@ -1184,7 +1319,9 @@ export struct MeowpuutKeyboard {
       region.width, arrowRight);
     if (box === null) return;
     const info = pm.getImageInfoSync();
-    ctx.drawImage(pm, 0, 0, info.size.width, info.size.height, box.left, box.top, box.width, box.height);
+    const k = this.pxRatio();
+    ctx.drawImage(pm, 0, 0, info.size.width, info.size.height,
+      box.left, box.top, box.width * k, box.height * k);
   }
 
   /** 把裁剪区设为「玻璃之外」，用于猫身下缘藏进玻璃。 */
@@ -1269,7 +1406,13 @@ export struct MeowpuutKeyboard {
       const selected = item.kind === 0 && item.index === st.highlighted;
       const pressed = n === this.pressedCandidate;
       if (selected) {
-        PillPainter.draw(ctx, cx, pillTop, item.width, region.pillHeight, look.pill, look.dark, true);
+        // 【iOS 风格】选中胶囊平滑滑动（segmented-control 式 240ms ease-out）：
+        // 首次出现不滑；同列表内高亮变化时从旧位置滑过来。
+        let px = cx;
+        let pw = item.width;
+        const slide = this.pillSlideX(cx, item.width);
+        if (slide !== null) { px = slide[0]; pw = slide[1]; }
+        PillPainter.draw(ctx, px, pillTop, pw, region.pillHeight, look.pill, look.dark, true);
       } else if (pressed || item.kind !== 0) {
         // 安卓：按下时叠 0.22（浅色）/0.30（深色）的底，预测与标点常态就有 0.10/0.14 的浅底。
         const alpha = pressed ? (look.dark ? 0.30 : 0.22) : (look.dark ? 0.14 : 0.10);

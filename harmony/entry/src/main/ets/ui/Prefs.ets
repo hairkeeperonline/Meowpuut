@@ -21,9 +21,18 @@ import { Palette, paletteOf, Tone, toneOf, GlassStrength, glassStrengthOf } from
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { fileIo } from '@kit.CoreFileKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
+import { commonEventManager } from '@kit.BasicServicesKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 
 const MIRROR = 'meowpuut-settings.json';
+
+/** 【跨进程同步】设置广播的载荷：变更键 + 全量快照。 */
+interface SettingsBroadcast {
+  key: string;
+  value: string | number | boolean;
+  all: Record<string, string | number | boolean>;
+}
 
 export class Prefs {
   static readonly MODE = 'mode';
@@ -43,8 +52,13 @@ export class Prefs {
   static readonly KEY_SOUND_VOLUME = 'keySoundVolume'; // 自定义音效音量 0-100
   static readonly KEYBOARD_HEIGHT = 'keyboardHeight'; // 键盘高度（short/standard/tall）
   static readonly EFFECTS = 'effects';               // 视觉特效（lightweight/standard/extreme）
+  static readonly KEYBOARD_POSITION = 'keyboardPosition'; // 键盘位置（bottom 贴底 / floating 悬浮）
 
   private store: preferences.Preferences | null = null;
+  /** init 时留存的 Context（诊断/二次读取用）。 */
+  private ctxRef: common.Context | null = null;
+  /** 【跨进程同步】公共事件订阅者（输入法进程持有）。 */
+  private subscriber: commonEventManager.CommonEventSubscriber | null = null;
   private pending: Map<string, string | number | boolean> = new Map();
   private changeListeners: Array<(key: string) => void> = [];
 
@@ -57,6 +71,7 @@ export class Prefs {
 
   /** 在拿到 Context 后调用一次。 */
   async init(context: common.Context): Promise<void> {
+    this.ctxRef = context;
     const options: preferences.Options = { name: 'meowpuut' };
     try {
       // 先删掉旧实例：鸿蒙的 Preferences 每个进程各有一份内存副本，
@@ -76,9 +91,12 @@ export class Prefs {
     this.mirrorPath = Prefs.resolveMirror(context);
     // 镜像优先：文件里的值比本进程 Preferences 缓存新。
     this.loadMirror();
-    // 镜像读不到时，退一步直接读 Preferences 落盘的 XML——
-    // 两个进程共享这个文件，但各自的 getPreferences 内存副本不会刷新。
-    if (this.mirror.size === 0) this.loadPrefsXml(context);
+    // 【跨进程同步修复】Preferences 落盘 XML 是两个进程共享的权威存储：
+    // 设置页（main 进程）写入 → IME 进程的镜像文件读不到（filesDir 进程隔离），
+    // 但 XML 是同一份。所以【每次 init 都读 XML 并覆盖镜像】——只在本进程没有
+    // 未落盘的 pending 写入时（此时本进程才是最新权威）。之前只在镜像为空时
+    // 读 XML，导致「色调/色系改了键盘不变化」。
+    if (this.pending.size === 0) this.loadPrefsXml(context);
     const pending = this.pending;
     this.pending = new Map();
     let wrote = false;
@@ -127,6 +145,7 @@ export class Prefs {
     }
     try {
       const xml = fileIo.readTextSync(path);
+      hilog.info(0x0000, 'MeowpuutPrefs', `xml loaded from ${path}: ${xml.length} bytes`);
       const re = /<string key="([^"]+)">([^<]*)<\/string>/g;
       const next = new Map<string, string | number | boolean>();
       let m: RegExpExecArray | null = re.exec(xml);
@@ -150,6 +169,7 @@ export class Prefs {
         this.mirror = next;
       }
     } catch (e) {
+      hilog.warn(0x0000, 'MeowpuutPrefs', `xml read failed ${path}: ${(e as Error).message ?? e}`);
       console.warn(`Meowpuut: prefs xml read failed ${path}`);
     }
   }
@@ -176,6 +196,112 @@ export class Prefs {
    * 直接比对文件内容而不是 mtime——mtime 精度不稳，而且两个进程
    * 可能在同一毫秒内写完，靠时间戳会漏掉更新。
    */
+  /**
+   * 【跨进程同步】发布设置变更公共事件。事件数据带 {key, value, all}：
+   * all 是全量快照（首次/兜底用），IME 进程收到后整份覆盖，保证单调一致。
+   */
+  /**
+   * 【全量快照】用当前实例的真实值构建（而不是 mirror——重装后 mirror 可能为空，
+   * 导致广播出去的快照只有本次改动的键，IME 冷启动恢复时缺其他键）。
+   */
+  private snapshotAll(): Record<string, string | number | boolean> {
+    const all: Record<string, string | number | boolean> = {};
+    all[Prefs.MODE] = this.mode;
+    all[Prefs.SIMPLIFIED] = this.simplified;
+    all[Prefs.SHAPE] = this.shape;
+    all[Prefs.TONE] = this.tone;
+    all[Prefs.PALETTE] = this.palette;
+    all[Prefs.STRENGTH] = this.strength;
+    all[Prefs.CATS] = this.cats;
+    all[Prefs.FESTIVALS] = this.festivals;
+    all[Prefs.HAPTICS] = this.haptics;
+    all[Prefs.SOUND] = this.sound;
+    all[Prefs.KEY_POPUPS] = this.keyPopups;
+    all[Prefs.HAPTIC_STRENGTH] = this.hapticStrength;
+    all[Prefs.KEY_SOUND] = this.keySound;
+    all[Prefs.KEY_SOUND_VOLUME] = this.keySoundVolume;
+    all[Prefs.KEYBOARD_HEIGHT] = this.keyboardHeight;
+    all[Prefs.EFFECTS] = this.effects;
+    all[Prefs.KEYBOARD_POSITION] = this.keyboardPosition;
+    return all;
+  }
+
+  private broadcast(key: string, value: string | number | boolean): void {
+    try {
+      const all = this.snapshotAll();
+      if (key !== '*') all[key] = value;   // '*' = 全量广播（publishSnapshot），不注入假键。
+      const params: commonEventManager.CommonEventPublishData = {
+        data: JSON.stringify({ key: key, value: value, all: all }),
+      };
+      commonEventManager.publish('com.krysta1ll.meowpuut.SETTINGS', params, (err: Error) => {
+        if (err) hilog.warn(0x0000, 'MeowpuutPrefs', `broadcast ${key} failed: ${err.message ?? err}`);
+      });
+    } catch (e) {
+      hilog.warn(0x0000, 'MeowpuutPrefs', `broadcast throw: ${(e as Error).message ?? e}`);
+    }
+  }
+
+  /**
+   * 【跨进程同步】订阅设置变更（输入法进程调用）。返回 true 表示订阅成功。
+   * 收到事件即把全量快照整份写回内存（不再落盘，避免回写风暴），然后触发监听器。
+   */
+  subscribe(onChange: (key: string) => void): boolean {
+    if (this.subscriber !== null) return true;
+    try {
+      const info: commonEventManager.CommonEventSubscribeInfo = {
+        events: ['com.krysta1ll.meowpuut.SETTINGS'],
+      };
+      commonEventManager.createSubscriber(info, (err: Error, sub: commonEventManager.CommonEventSubscriber) => {
+        if (err || sub === undefined || sub === null) {
+          hilog.warn(0x0000, 'MeowpuutPrefs', `createSubscriber failed: ${err?.message ?? err}`);
+          return;
+        }
+        this.subscriber = sub;
+        commonEventManager.subscribe(sub, (e: Error, data: commonEventManager.CommonEventData) => {
+          if (e || data === undefined || data === null) return;
+          try {
+            const payload = JSON.parse(data.data ?? '{}') as SettingsBroadcast;
+            const next = new Map<string, string | number | boolean>();
+            const all = payload.all;
+            for (const k of Object.keys(all)) next.set(k, all[k]);
+            this.mirror = next;
+            hilog.info(0x0000, 'MeowpuutPrefs', `received settings broadcast: ${payload.key}=${payload.value} (${next.size} keys)`);
+            // 【冷启动恢复】把广播快照持久化进本进程沙盒：IME 重启后（此时设置页
+            // 进程未必活着、广播没人发）直接从这份镜像恢复，不再回退默认值。
+            this.persistSnapshot(next);
+            onChange(payload.key);
+          } catch (err2) {
+            hilog.warn(0x0000, 'MeowpuutPrefs', `broadcast parse failed: ${(err2 as Error).message ?? err2}`);
+          }
+        });
+      });
+      return true;
+    } catch (e) {
+      hilog.warn(0x0000, 'MeowpuutPrefs', `subscribe throw: ${(e as Error).message ?? e}`);
+      return false;
+    }
+  }
+
+  /**
+   * 【冷启动恢复】把全量快照写进本进程 Preferences（异步、静默失败）。
+   * 只在收到设置页广播时调用：广播数据永远比本进程旧值新。
+   */
+  private persistSnapshot(snapshot: Map<string, string | number | boolean>): void {
+    if (this.store === null) return;
+    snapshot.forEach((v: string | number | boolean, k: string) => {
+      this.store?.put(k, v as preferences.ValueType).catch(() => {});
+    });
+    this.store.flush().catch(() => {});
+  }
+
+  /**
+   * 【全量广播】设置页进程在 init 完成后主动调用一次，把整份当前值推给
+   * 输入法进程（IME 冷启动/漂移时的对齐兜底）。
+   */
+  publishSnapshot(): void {
+    this.broadcast('*', '*');
+  }
+
   private syncMirror(): void {
     if (this.mirrorPath === null) return;
     try {
@@ -214,7 +340,13 @@ export class Prefs {
   private applyValue(key: string, value: string | number | boolean): void {
     this.mirror.set(key, value);
     if (this.store !== null) {
-      this.store.put(key, value as preferences.ValueType).then(() => this.store?.flush()).catch(() => {});
+      this.store.put(key, value as preferences.ValueType).then(() => {
+        this.store?.flush();
+        // 【跨进程同步】文件通道（filesDir 镜像与 preferences XML）在 main/inputMethod
+        // 两个进程间被沙盒隔离（真机实测同一路径互相不可见），改用系统公共事件广播：
+        // 设置页进程发布、输入法进程订阅，收到后热更新（无需重弹键盘）。
+        this.broadcast(key, value);
+      }).catch(() => {});
     }
   }
 
@@ -328,6 +460,12 @@ export class Prefs {
     return v === 'short' || v === 'tall' ? v : 'standard';
   }
   set keyboardHeight(value: string) { this.put(Prefs.KEYBOARD_HEIGHT, value); }
+
+  /** 键盘位置（bottom 贴底 / floating 悬浮，默认 bottom）。 */
+  get keyboardPosition(): string {
+    return this.getString(Prefs.KEYBOARD_POSITION, null) === 'floating' ? 'floating' : 'bottom';
+  }
+  set keyboardPosition(value: string) { this.put(Prefs.KEYBOARD_POSITION, value); }
 
   /** 视觉特效（对应 Android effects：lightweight/standard/extreme，默认 standard）。 */
   get effects(): string {

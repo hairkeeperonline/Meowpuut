@@ -102,20 +102,31 @@ export class CandidateRegionLayout {
     const rimY = Math.min(0.3, Math.max(0, rim)) * glassHeight;
 
     if (cats) {
-      this.height = Math.round(regionHeight);
-      const glassBottom = this.height - 2 * s;
-      const top = glassBottom - glassHeight;
+      // 【鸿蒙额外留白】不做玻璃裁剪后猫是整只完整显示，需要额外头顶空间，
+      // 否则放大后的猫头会超出候选栏 Canvas 被裁掉。
+      // 全部按比例推导（不写绝对像素）：留白取自玻璃高度的一部分，
+      // 因此候选栏在不同屏宽/字号/输入框缩放下一并等比变化，不会出现某档尺寸下猫被切头的硬编码失效。
+      const catHeadroom = glassHeight * CandidateRegionLayout.CAT_HEADROOM_RATIO;
+      this.height = Math.round(regionHeight + catHeadroom);
+      // 玻璃只留容纳候选胶囊所需的高度：胶囊高 pillHeight，上下各留一点点余量。
+      // 多余部分让给猫，使猫的爪子压得更低、直接搭在下方符号键区上沿，
+      // 而不是隔着一整块玻璃和键区离得很远。
+      const pill = Math.round(glassHeight * 0.70);
+      const slimGlass = Math.max(pill + 4 * s, glassHeight * CandidateRegionLayout.GLASS_SLIM_RATIO);
+      // 玻璃直接贴住候选栏底缘（不留间隙）：避免猫脚下露出一条浅色带。
+      const glassBottom = this.height;
+      const top = glassBottom - slimGlass;
       const leftStart = 2 * s;
       const leftWidth = leftHeight * BarFrame.LEFT_ASPECT;
       const rightStart = this.width - 4 * s - rightHeight * BarFrame.RIGHT_ASPECT;
       const glassLeft = leftStart + 0.24 * leftWidth;
-      this.glass = new Box(glassLeft, top, Math.max(1, this.width - 6 * s - glassLeft), glassHeight);
+      this.glass = new Box(glassLeft, top, Math.max(1, this.width - 6 * s - glassLeft), slimGlass);
       const chevronWidth = 34 * s;
       const chevronY = boxCenterY(this.glass) + rimY / 2 + 2 * s;
-      const chevronHeight = Math.min(Math.min(44, glassHeight), 2 * (this.height - chevronY));
+      const chevronHeight = Math.min(Math.min(44, slimGlass), 2 * (this.height - chevronY));
       this.chevron = new Box(rightStart - 6 * s - chevronWidth / 2, chevronY - chevronHeight / 2, chevronWidth, chevronHeight);
       const rowLeft = leftStart + leftWidth + 2 * s;
-      this.row = new Box(rowLeft, this.glass.top, Math.max(1, this.chevron.left - rowLeft), glassHeight);
+      this.row = new Box(rowLeft, this.glass.top, Math.max(1, this.chevron.left - rowLeft), slimGlass);
     } else {
       this.height = Math.round(glassHeight + 12 * s);
       this.glass = new Box(4 * s, (this.height - glassHeight) / 2, Math.max(1, this.width - 8 * s), glassHeight);
@@ -131,6 +142,21 @@ export class CandidateRegionLayout {
   get maximumCandidateWidth(): number { return Math.max(60, this.row.width * 0.70); }
 
   static readonly ARROW_WIDTH = 11;
+
+  /**
+   * 候选栏给猫头预留的额外高度，取玻璃高度的比例（不写死像素）。
+   * 【0.9.1 对齐】安卓 0.9.1 真机实测：候选栏总高 ≈ regionHeight（无额外留白），
+   * 玻璃贴栏底、猫头允许小幅探出玻璃上方（≈24dp），猫本身缩放由 FILL 控制。
+   * 旧值 0.52 会把玻璃压扁、把猫顶到高处悬空（真机像素分析证实），随 0.9.1 废弃。
+   */
+  static readonly CAT_HEADROOM_RATIO = 0;
+
+  /**
+   * 玻璃最小高度相对原玻璃高度的比例（鸿蒙专用）。
+   * 玻璃只需容纳候选胶囊（pillHeight = glassHeight × 0.70），其余高度让给猫，
+   * 使猫爪压得更低、直接搭在下方符号键区上沿。随 glassHeight 等比缩放，不写死像素。
+   */
+  static readonly GLASS_SLIM_RATIO = 0.92;
 }
 
 export class KeyMetrics {
