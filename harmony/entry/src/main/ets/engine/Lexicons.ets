@@ -64,6 +64,7 @@ export class Lexicons {
       lex = 0;
     }
     let newSession = 0;
+    let newEnglish = 0;
     if (lex !== 0) {
       let pairs = false;
       try {
@@ -75,14 +76,17 @@ export class Lexicons {
       // 【内核更换 round 62】拼音/九键词库挂英文词（mimo_en.bin）：拼音与九键
       // 打字可直接出英文词（排在中文之后，屏蔽词永不主动出）。必须在创建
       // 会话之前挂（引擎不接受已有会话的词库再挂英文词）。
+      // 【round 64 真机修复】引擎句柄先存局部变量：此前直接赋 this.english，
+      // 而下方 swap 前的 this.release() 会把它 englishClose 清零——每次加载
+      // 英文引擎都被立即销毁，英文预测行（ABC 模式）从未真正可用。
       if (pinyin) {
         try {
           const enData = await this.context.resourceManager.getRawFileContent('lexicon/mimo_en.bin');
           const en = NativeEngine.attachEnglish(lex, enData);
           // 同一份字节再开独立的英文引擎句柄（copy=1，引擎自行复制），
           // 供 ABC 模式的补全/纠错/下一词预测使用。
-          this.english = NativeEngine.englishOpen(enData);
-          console.info(`${TAG}: english words attached: ${en}, engine words ${NativeEngine.englishWordCount(this.english)}`);
+          newEnglish = NativeEngine.englishOpen(enData);
+          console.info(`${TAG}: english words attached: ${en}, engine words ${NativeEngine.englishWordCount(newEnglish)}`);
         } catch (e) {
           console.warn(`${TAG}: mimo_en.bin unavailable, english words off`);
         }
@@ -107,11 +111,15 @@ export class Lexicons {
     if (token !== this.generation) {
       if (newSession !== 0) NativeEngine.sessionDestroy(newSession);
       if (lex !== 0) NativeEngine.lexiconDestroy(lex);
+      // 中途被新加载取代：刚打开的英文引擎也要销毁（它已复制字节、独立于词库）。
+      if (newEnglish !== 0) NativeEngine.englishClose(newEnglish);
       return;
     }
     this.release();
     this.lexicon = lex;
     this.session = newSession;
+    // release 已关掉旧引擎，这里才接管新引擎（见上方修复说明）。
+    this.english = newEnglish;
     this.loadedPinyin = lex !== 0 ? pinyin : null;
     this.loadedNineKey = lex !== 0 && newSession !== 0 ? nineKey : null;
     ready(newSession);

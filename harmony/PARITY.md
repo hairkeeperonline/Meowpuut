@@ -1538,6 +1538,22 @@ if (this.composer.composing && this.lastPreviewAt > 0 &&
 
 **遗留（下轮候选）**：物理键盘 ESCAPE 修复未插物理键盘复测；英文预测行/悬浮拖拽/粘贴芯片沿用前轮代码（未在本轮真机重测）。
 
+### 追加 3：round 64 P1 遗留项真机收尾（英文预测/粘贴芯片/悬浮键盘）
+
+**英文预测行（round 62 功能，本轮首次真机验证即抓到双重 bug）**：
+- **Bug A（引擎自杀）**：`Lexicons.open` 在加载块内直接 `this.english = englishOpen(...)`，而 swap 前的 `this.release()` 会把刚打开的引擎 englishClose 清零——**每次加载英文引擎都被立即销毁**，`englishRow: engine=0` 恒成立，mimo_en.bin 从未真正可用。修复：句柄先存局部变量 `newEnglish`，release 后接管（中途被取代时同样销毁新句柄）。
+- **Bug B（状态不推送）**：`typeEngine` 英文分支 `commit + updatePredictions` 后不 refreshKeyboard（letterTyped 仅 shift 变化时刷新），预测更新了但候选栏永远收不到。修复：补 refreshKeyboard。
+- 验证：hel → `he'll|help|hello|hell|Helen|helping|Helene|helped`（hilog 引擎句柄非零）+ 视觉确认预测胶囊渲染在候选栏（「粘贴 | he'll | help | hell」）。诊断日志收敛为 engine=0 时才 warn。
+
+**粘贴芯片（round 61，视觉+行为验证）**：候选栏左端「粘贴」芯片渲染 ✓；点击 → `sendExtendAction(PASTE)` 受理 → 系统 pasteboard 服务事件 → 文本真实插入输入框（端到端工作）。剪贴板具体内容为系统态，非应用缺陷。
+
+**悬浮键盘（round 61/62，视觉+像素级验证）**：
+- 悬浮态 ✓（FLG_FLOATING + moveTo 卡片位，白色圆角面板四周留空，九键内容完整）
+- 拖拽 ✓（把手 PanGesture → dragPanel 增量移动，dragPanel 日志确认逐帧落点）
+- **钳制修复**：原下缘钳制 `ny = 屏高-面板高` 会把底行压进系统手势导航区（底行贴屏底压线、与上滑手势冲突）。修复：钳制额外留 48px 导航区余量。像素级验证（逐行扫描 x=660 列）：空格键底缘 y≈2064、面板底 ≈2080、主页指示条 ≈2095 位于键区下方不重叠、屏底余量 ~56px——底行完整可见。注意：视觉代理对贴边布局的「截断」误报两次，最终以像素扫描定谳。
+
+设备状态已还原（简体+九键+贴底）。
+
 ### 追加 2：round 64 视觉验证（qwen3.8-max 视觉子代理读真机截图）
 
 无视觉通道问题解决：workflow 的 agent() 独立 provider/model 覆盖可路由 volcai/qwen3.8-max（普通 subagent 路由受会话策略限制不可用），8 张状态截图（hdc snapshot_display）由视觉代理逐图比对安卓对齐预期——键位为 Canvas 绘制不进 a11y 树，视觉是布局验证的唯一通道。

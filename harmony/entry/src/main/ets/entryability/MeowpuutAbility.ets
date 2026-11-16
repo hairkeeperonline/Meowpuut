@@ -458,8 +458,11 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
       ? disp.width : disp.width - 48);
     const panelH = this.floatingPanelHeight();
     // 左边距和上边距最小 0；右边/下边不允许越出屏幕（显示不全修复）。
+    // 【round 64 真机修复】下缘钳制额外留 48px：贴底钳制（ny = 屏高-面板高）会把
+    // 底行压进系统手势导航区——真机视觉验证底行与屏幕底缘压线、且上滑手势
+    // （返回桌面）会与面板操作冲突。留出导航条高度的余量。
+    const ny = Math.max(0, Math.min(disp.height - panelH - 48, this.floatY + dy));
     const nx = Math.max(0, Math.min(disp.width - panelW, this.floatX + dx));
-    const ny = Math.max(0, Math.min(disp.height - panelH, this.floatY + dy));
     this.floatX = nx;
     this.floatY = ny;
     this.panel.moveTo(nx, ny).catch(() => {});
@@ -832,6 +835,8 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
   private updateEnglishRow(): void {
     const engine = this.lexicons !== null ? this.lexicons.englishEngine() : 0;
     if (engine === 0) {
+      // 引擎缺失才记日志（诊断用）：正常打字每键都走这里，不刷屏。
+      hilog.warn(0x0000, 'MeowpuutIME', 'englishRow: engine=0 (mimo_en.bin not loaded)');
       this.predictions = [];
       this.englishReplace = [];
       return;
@@ -898,6 +903,11 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
       this.commit(String.fromCharCode(c));
       this.letterTyped();
       this.updatePredictions();
+      // 【round 64 真机修复】英文预测行需要状态推送才会显示：updateEnglishRow 只改
+      // this.predictions，而候选栏经 KeyboardHost 渲染、必须 refreshKeyboard 推送。
+      // 此前这里不推送（letterTyped 仅在 shift 变化时刷新），英文小写打字时预测行
+      // 永远不出现（round 62 上线以来首次真机验证即抓到）。
+      this.refreshKeyboard();
       return;
     }
     if (!this.composer.ready) {
