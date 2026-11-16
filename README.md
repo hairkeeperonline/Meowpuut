@@ -1,3 +1,7 @@
+> **分支说明（HarmonyOS 移植分支）**：本分支只保留 HarmonyOS（鸿蒙）输入法移植与其引擎构建链
+> （`harmony/` + Rust 引擎 + 词库数据 + 核心脚本，共 62 轮移植见 `harmony/PARITY.md`）。
+> iOS / macOS / Windows / Android 客户端与多平台主干在 `main` 分支。
+
 <p align="center">
   <img src="assets/brand/MeowpuutMark.png" width="160" alt="米米莫和莫莫">
 </p>

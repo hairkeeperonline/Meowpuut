@@ -1451,3 +1451,9 @@ if (this.composer.composing && this.lastPreviewAt > 0 &&
 - HAP 86.7MB（原 93.8MB）：libmeowpuut_napi.so 含全部新符号（mpn_nine_key_session_create / mpn_english_open / mpn_lexicon_attach_english 等，arm64+x86_64），rawfile 含 mimo_en.bin，modules.abc 含新 ArkTS 标记（nineKeySessionCreate / updateEnglishRow / englishReplace / loadedNineKey）。
 - 验证：全 crate 经 ohos 双 target 交叉编译（aarch64 / x86_64）；check-lexicon.py PASS（465,287 读音 / mimo_base 65.6MB / 853,302 词对 / never-volunteer 1,324 词 / 双原生索引核对）；宿主 cargo test 因本机无 MSVC link.exe 无法执行（纯工具链限制，非代码问题）。
 
+## Round 62 后续 — 分支重组
+
+- **harmonyOS 分支**（本分支）：去除非 HarmonyOS 部分，只保留 `harmony/` + Rust 引擎（crates/）+ 词库数据（DataSources/ + Resources/Lexicon）+ 核心脚本 + 猫/节日贴图资源 + 引擎测试；其余客户端（Android / iOS / Windows / macOS Sources / Modules）与平台脚本、iOS 商店文档、macOS 资源包全部移除。构建链验证：build-harmony.sh --prepare + HAP 打包全通过，产物与重组前逐字节一致。
+- **main 分支**：已同步远端主干（03ceae4，Engine 子模块 = Meowpuut-Core f8e5993，与我们同步的核心一致）并清理过时引用（build-rust.sh 注释），提交 7cadad5 推送。
+- 本分支保持自包含布局（crates/ 在仓库根），不采用 main 的 Engine 子模块结构——Windows 构建机克隆即用、无需 submodule init。
+

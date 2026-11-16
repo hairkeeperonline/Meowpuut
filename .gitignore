@@ -16,3 +16,7 @@ __pycache__/
 iOS/Photos/
 .claude/
 Meowpuut-Core/
+
+# Rust 工具链曾误提交（600MB）；防止再被 git add -A 扫入
+.rust/
+.agent-teams/
