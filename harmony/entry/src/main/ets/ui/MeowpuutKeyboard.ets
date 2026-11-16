@@ -616,12 +616,18 @@ export struct MeowpuutKeyboard {
     const cat = catName === 'momo' ? Cat.MOMO : Cat.MIMIMO;
     const timeScale = this.motionTimeScale();
     this.motions.set(catName, new CatMotion(cat, Date.now(), timeScale));
-    this.toastText = toast;
-    this.toastHearts = hearts;
-    this.toastEmphasis = hearts < 0 && toast.length > 0;
-    // 时长对照 Android Toast.duration：emphasis 2400ms，否则 1400ms。
-    this.toastStart = Date.now();
-    this.toastExpires = this.toastStart + (this.toastEmphasis ? 2400 : 1400);
+    // 【真机反馈 round 63】空文案且无爱心进度时不弹 toast：米米莫每次、莫莫第 1 下
+    // 都走到这里（对照 Android CandidateBarView.kt:722 拍第 1 下不出提示），此前
+    // 照样启动计时器，drawToast 会画出 48×30 的空深色胶囊——候选栏中央的「黑点」。
+    // 空内容时也不动正在显示的进度 toast：先摸莫莫再立刻摸米米莫，进度提示不被打断。
+    if (toast.length > 0 || hearts >= 0) {
+      this.toastText = toast;
+      this.toastHearts = hearts;
+      this.toastEmphasis = hearts < 0 && toast.length > 0;
+      // 时长对照 Android Toast.duration：emphasis 2400ms，否则 1400ms。
+      this.toastStart = Date.now();
+      this.toastExpires = this.toastStart + (this.toastEmphasis ? 2400 : 1400);
+    }
     // 简繁切换/提示的语音播报（对应 Android onPet 里的 bar.announce）。
     if (toast.length > 0) this.announceAccessibility(toast);
     // 摸猫喷粒子（对照 Android CandidateBarView.pet）：
