@@ -5,7 +5,6 @@
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { inputMethod, InputMethodSubtype } from '@kit.IMEKit';
-import { uiMaterial } from '@kit.ArkUI';
 import { image } from '@kit.ImageKit';
 import { util } from '@kit.ArkTS';
 import { InputMode } from '../engine/Types';
@@ -60,25 +59,6 @@ struct SettingsPage {
   private licenseDialog: CustomDialogController | null = null;
 
   private prefs: Prefs = new Prefs();
-  /**
-   * 鸿蒙 7.0 的沉浸式材质。设置页顶部标题区用它做成悬浮玻璃，
-   * 让页面滚动的内容从玻璃下面透出来。设备不支持时留空，退回普通底色。
-   */
-  private headerMaterial: uiMaterial.Material | undefined = undefined;
-
-  /** 造一份沉浸式材质；设备不支持就返回 undefined，调用方按普通背景渲染。 */
-  private static makeMaterial(): uiMaterial.Material | undefined {
-    try {
-      if (!uiMaterial.isImmersiveMaterialSupported()) return undefined;
-      const options: uiMaterial.ImmersiveOptions = {
-        style: uiMaterial.ImmersiveStyle.THIN,
-      };
-      return new uiMaterial.ImmersiveMaterial(options);
-    } catch (e) {
-      return undefined;
-    }
-  }
-
   aboutToAppear(): void {
     // 【真机反馈 round 63-2】设置页闪退修复：全局 mediaquery.matchMediaSync 在部分
     // 真机运行时未绑定，aboutToAppear 直接抛错导致页面进不去。改为只走
@@ -92,7 +72,6 @@ struct SettingsPage {
       this.darkQuery = null;
       this.isDark = false;
     }
-    this.headerMaterial = SettingsPage.makeMaterial();
     const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
     this.prefs.init(ctx).then(() => {
       this.mode = this.prefs.mode;
@@ -181,6 +160,8 @@ struct SettingsPage {
    */
   private pageBg(): string { return this.isDark ? '#FF1C1B1F' : '#F2F2F7'; }
   private cardBg(): string { return this.isDark ? '#FF26252A' : '#FFFFFF'; }
+  /** 渐隐遮罩末端：pageBg 的全透明版本。 */
+  private pageBgTransparent(): string { return this.isDark ? '#001C1B1F' : '#00F2F2F7'; }
   private secondaryText(): string { return this.isDark ? '#FF9C9CA4' : '#8A8A8E'; }
   private disabledText(): string { return this.isDark ? '#FF5A595F' : '#FFC7C7CC'; }
   private dividerColor(): string { return this.isDark ? '#FF38373D' : '#FFE5E5EA'; }
@@ -264,6 +245,24 @@ struct SettingsPage {
       .opacity(0.7)
       .width('100%')
       .margin({ top: 4, bottom: 6, left: 4 })
+  }
+
+  /** 【UX round 63-5】品牌标题：透明底 + 页面同源配色（替换系统材质玻璃，色系与内容一致）。 */
+  @Builder
+  brandTitle() {
+    Row() {
+      Text('喵扑')
+        .fontSize(26)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(this.textPrimary())
+      Text('  Meowpuut')
+        .fontSize(14)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(this.secondaryText())
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16, top: 8, bottom: 4 })
+    .alignItems(VerticalAlign.Bottom)
   }
 
   @Builder
@@ -425,11 +424,12 @@ struct SettingsPage {
   }
 
   build() {
-    // 材质只允许挂在 Navigation 标题栏 / TabBar 里（系统会校验作用域，
-    // 挂在普通 Column 上会打 "Material inactive: out of scope" 并静默不生效）。
+    // 【UX round 63-5】顶部渐隐：去掉系统材质玻璃（设备上渲染成与页面不一致的
+    // 独立色带），标题透明底 + 内容顶部 40vp 渐变遮罩，滚动内容在标题下柔化消失。
     Navigation() {
       Column() {
         // 品牌标题由 Navigation 标题栏承载（「喵扑 Meowpuut」），此处不再重复。
+        Stack({ alignContent: Alignment.Top }) {
         Scroll() {
           Column() {
           // 添加键盘引导（对照 Android setup_title / setup_open_settings / setup_pick）。
@@ -706,24 +706,34 @@ struct SettingsPage {
           .width('100%')
           .margin({ top: 16, bottom: 40 })
         }
-        .padding({ left: 16, right: 16 })
+        .padding({ left: 16, right: 16, top: 40 })
+        }
+        .width('100%')
+        .height('100%')
+        .align(Alignment.Top)
+        // 顶部渐隐遮罩：页面底色渐变到透明；hitTest 穿透保证滚动不受阻。
+        Column() { }
+          .width('100%')
+          .height(40)
+          .linearGradient({
+            angle: 180,
+            colors: [[this.pageBg(), 0.0], [this.pageBgTransparent(), 1.0]],
+          })
+          .hitTestBehavior(HitTestMode.None)
         }
         .width('100%')
         .layoutWeight(1)
-        .align(Alignment.Top)
       }
       .width('100%')
       .height('100%')
       .backgroundColor(this.pageBg())
     }
-    .title('喵扑 Meowpuut', {
-      // 沉浸式材质：标题栏像悬浮玻璃，内容滚过时透出真实模糊。
-      systemMaterial: this.headerMaterial,
-    })
+    .title(this.brandTitle())
     .titleMode(NavigationTitleMode.Full)
     .hideBackButton(true)
     .width('100%')
     .height('100%')
+    .backgroundColor(this.pageBg())
   }
 }
 

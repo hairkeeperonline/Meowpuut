@@ -1480,3 +1480,5 @@ if (this.composer.composing && this.lastPreviewAt > 0 &&
 **追加修复 3（同轮，真机定位）**：设置页闪退真正根因——UX 补丁的 replace_all 把配色助手函数体内的浅色字面量也替换成了助手调用（如 `pageBg` 的浅色分支变成 `return this.pageBg()`），浅色模式 100% 自递归 → `RangeError: Stack overflow` → 进程被杀。真机 hilog 栈：49 帧 `pageBg` 自调用。修复：7 个助手全部恢复字面量；全仓自动化循环调用审计通过（无任何自/互递归）。此前的 mediaquery 改动保留（更稳但非根因）。
 
 **追加修复 4（同轮）**：九键底行对齐安卓原版——此前是自造的「符號/空格/刪除/換行」四键，缺 123 数字键盘与中英切换。现对齐安卓 nineKeyBottom：`符號(1.2) | 123(1.0) | 空格(flex) | 中英切换(1.0) | 换行(1.65)`；删除键位置对照安卓在行 1 右端（side 列）。新增九键专属数字页（NUMERIC_PAGE=9，避开 1/2 通用符号与 3-8 emoji 分类）：3×4 数字 + 标点环绕 + 底行 `九键 | , | 0 | . | 换行`，对照安卓 nineKeyNumbers。
+
+**追加修复 5（同轮）**：设置页顶部「喵扑」渐隐 + 色系统一——systemMaterial 系统玻璃在真机渲染成与页面不一致的独立色带。改为：自定义品牌标题（喵扑 26vp 粗体 + Meowpuut 14vp，textPrimary/secondaryText 同源配色，透明底）；Navigation 与内容区统一 pageBg 背景；内容顶部加 40vp 渐隐遮罩（pageBg→透明，hitTest 穿透），滚动内容在标题下柔和消失；清除 uiMaterial 死代码。
