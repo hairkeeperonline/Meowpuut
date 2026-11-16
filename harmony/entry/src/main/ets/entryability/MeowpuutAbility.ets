@@ -105,6 +105,40 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
   private consumedKeys: Set<number> = new Set<number>();
   /** 物理键盘事件源（KeyboardDelegate），onCreate 时注册。 */
   private hwDelegate: inputMethodEngine.KeyboardDelegate | null = null;
+  /** 物理键盘 keyEvent 回调（实例字段保持稳定引用：onDestroy 反注册需与 on 同一函数）。 */
+  private hwKeyCallback: (ev: InputKeyEvent) => boolean = (ev: InputKeyEvent): boolean => {
+    return this.hardwareKeyEvent(ev);
+  };
+  /** selectionChange 回调（同上：off 反注册必须用注册时的同一引用）。 */
+  private hwSelectionCallback: (oldBegin: number, oldEnd: number, newBegin: number, newEnd: number) => void =
+    (oldBegin: number, oldEnd: number, newBegin: number, newEnd: number): void => {
+      // 跟踪选区状态：onDelete 时若有选区，应先删选区（对照 Android getSelectedText）。
+      this.hasSelection = newBegin !== newEnd;
+      // 预览同步（setPreviewText/finishTextPreview）本身会让光标移动并回调 selectionChange，
+      // 若把它当成「用户把光标移走」而清空组字，会出现「每输一个字母前一个就消失」的致命回归
+      // （真机取证：PV 日志里第二键 wasC=false，raw 被本回调清掉）。一次按键可能触发不止一个
+      // 回调，因此用时间窗抑制：预览调用后 SELF_DRIVEN_MS 内的选区变化一律视为自驱动。
+      if (this.composer.composing && this.lastPreviewAt > 0 &&
+        Date.now() - this.lastPreviewAt < MeowpuutAbility.SELF_DRIVEN_MS) {
+        return;
+      }
+      if (this.composer.composing && (newBegin !== oldBegin || newEnd !== oldEnd)) {
+        // 用户真把光标移走了：先把预览落地成普通文本（对齐 Android 的 composing 文本
+        // 留在原处变成非组字文本），再清组字状态——否则预览悬空，后续 {-1/-1} 更新
+        // 会作用在过期的预览区上，新字母插不进新光标位置。
+        if (this.previewSupported && this.inputClient !== null) {
+          try {
+            this.lastPreviewAt = Date.now();
+            this.inputClient.finishTextPreview();
+          } catch (e) {
+            // 落地失败也继续清组字，避免候选栏挂着过时状态。
+          }
+        }
+        this.composer.clear();
+        this.expanded = false;
+        this.refreshKeyboard();
+      }
+    };
   predictions: string[] = [];
   /** 英文模式下 predictions[i] 要替换的光标前字符数（补全/纠错），预测则为 0。 */
   private englishReplace: number[] = [];
@@ -190,11 +224,16 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
       // 避免每次按键都发一次注定失败的 IPC。同时把预览样式设为下划线（同安卓组字下划线）。
       this.previewSupported = true;
       this.previewLength = 0;
+      // 顺手缓存回车键类型：编辑框属性在一次 inputStart 会话内恒定，returnTitle
+      // 命中缓存即免掉每次刷新键盘的 getEditorAttributeSync IPC；探测失败按
+      // UNSPECIFIED 兜底（与 returnTitle 实时查询的 catch 分支语义一致）。
       try {
         const attr = inputClient.getEditorAttributeSync();
         this.previewSupported = attr.isTextPreviewSupported;
+        this.enterKeyTypeCached = attr.enterKeyType;
       } catch (e) {
         this.previewSupported = true;
+        this.enterKeyTypeCached = inputMethodEngine.ENTER_KEY_TYPE_UNSPECIFIED;
       }
       try {
         const style: Record<string, inputMethodEngine.CommandDataType> = { 'previewTextStyle': 'underline' };
@@ -252,40 +291,10 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     // KeyEvent（含 unicodeChar / ctrlKey / shiftKey 等），足以复刻完整硬键盘输入。
     try {
       this.hwDelegate = inputMethodEngine.getKeyboardDelegate();
-      this.hwDelegate.on('keyEvent', (ev: InputKeyEvent) => {
-        return this.hardwareKeyEvent(ev);
-      });
+      this.hwDelegate.on('keyEvent', this.hwKeyCallback);
       // 光标/选区变化：对应 Android onUpdateSelection——组字时若光标被用户移走，
-      // 清空未完成的组字，避免候选栏挂着过时的组字。
-      this.hwDelegate.on('selectionChange',
-        (oldBegin: number, oldEnd: number, newBegin: number, newEnd: number) => {
-          // 跟踪选区状态：onDelete 时若有选区，应先删选区（对照 Android getSelectedText）。
-          this.hasSelection = newBegin !== newEnd;
-          // 预览同步（setPreviewText/finishTextPreview）本身会让光标移动并回调 selectionChange，
-          // 若把它当成「用户把光标移走」而清空组字，会出现「每输一个字母前一个就消失」的致命回归
-          // （真机取证：PV 日志里第二键 wasC=false，raw 被本回调清掉）。一次按键可能触发不止一个
-          // 回调，因此用时间窗抑制：预览调用后 SELF_DRIVEN_MS 内的选区变化一律视为自驱动。
-          if (this.composer.composing && this.lastPreviewAt > 0 &&
-            Date.now() - this.lastPreviewAt < MeowpuutAbility.SELF_DRIVEN_MS) {
-            return;
-          }
-          if (this.composer.composing && (newBegin !== oldBegin || newEnd !== oldEnd)) {
-            // 用户真把光标移走了：先把预览落地成普通文本（对齐 Android 的 composing 文本
-            // 留在原处变成非组字文本），再清组字状态——否则预览悬空，后续 {-1/-1} 更新
-            // 会作用在过期的预览区上，新字母插不进新光标位置。
-            if (this.previewSupported && this.inputClient !== null) {
-              try {
-                this.lastPreviewAt = Date.now();
-                this.inputClient.finishTextPreview();
-              } catch (e) {
-                // 落地失败也继续清组字，避免候选栏挂着过时状态。
-              }
-            }
-            this.composer.clear();
-            this.expanded = false;
-            this.refreshKeyboard();
-          }
-        });
+      // 清空未完成的组字，避免候选栏挂着过时的组字（回调体见 hwSelectionCallback 字段）。
+      this.hwDelegate.on('selectionChange', this.hwSelectionCallback);
       hilog.info(0x0000, 'MeowpuutIME', 'hardware keyboard delegate registered');
     } catch (e) {
       hilog.warn(0x0000, 'MeowpuutIME', 'getKeyboardDelegate failed, no hardware keys');
@@ -339,6 +348,19 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
   onDestroy(): void {
     this.composer.detach();
     this.lexicons?.shutdown();
+    // 【清理补全】释放按键音效 SoundPool（release 此前无调用者，不释放会泄漏到进程结束）。
+    try {
+      this.keySounds?.release();
+    } catch (e) {
+      // 释放失败静默：onDestroy 不允许抛错。
+    }
+    // 反注册物理键盘回调（off 传与 on 注册时相同的函数引用）。
+    try {
+      this.hwDelegate?.off('keyEvent', this.hwKeyCallback);
+      this.hwDelegate?.off('selectionChange', this.hwSelectionCallback);
+    } catch (e) {
+      // 未注册成功时 off 可能抛错，忽略。
+    }
   }
 
   onStop(): void {
@@ -690,6 +712,9 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
 
   /** 当前编辑框是否支持文本预览（isTextPreviewSupported 探测结果）。 */
   private previewSupported: boolean = true;
+
+  /** 回车键类型缓存（inputStart 探测回填；-1 = 尚未探测，returnTitle 退回实时查询）。 */
+  private enterKeyTypeCached: number = -1;
 
   /**
    * 组字预览：把当前原始串（如 nihao）显示在输入框，选择候选后替换成汉字，
@@ -1320,12 +1345,18 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
   private returnTitle(): [string, boolean] {
     const w = (s1: string, s2: string) => this.prefs.simplified ? s2 : s1;
     if (this.composer.composing) return [w('確認', '确认'), false];
-    let keyType = inputMethodEngine.ENTER_KEY_TYPE_UNSPECIFIED;
-    try {
-      keyType = this.inputClient?.getEditorAttributeSync().enterKeyType ??
-        inputMethodEngine.ENTER_KEY_TYPE_UNSPECIFIED;
-    } catch (e) {
-      keyType = inputMethodEngine.ENTER_KEY_TYPE_UNSPECIFIED;
+    // 回车键类型缓存（inputStart 探测回填）：编辑框属性在一次 inputStart 会话内
+    // 恒定，命中即免一次 getEditorAttributeSync IPC；-1 = 尚未探测（inputStart
+    // 之前的刷新），退回原有实时查询并回填缓存，后续调用直接命中。
+    let keyType = this.enterKeyTypeCached;
+    if (keyType < 0) {
+      try {
+        keyType = this.inputClient?.getEditorAttributeSync().enterKeyType ??
+          inputMethodEngine.ENTER_KEY_TYPE_UNSPECIFIED;
+      } catch (e) {
+        keyType = inputMethodEngine.ENTER_KEY_TYPE_UNSPECIFIED;
+      }
+      this.enterKeyTypeCached = keyType;
     }
     switch (keyType) {
       case inputMethodEngine.ENTER_KEY_TYPE_SEARCH: return [w('搜尋', '搜索'), true];
@@ -1491,6 +1522,15 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
         case 'return': this.enter(); break;
         case 'globe': this.switchKeyboard(); break;
         case 'toggleEnglish': this.toggleEnglish(); break;
+        // 【九键 round 63-6】重输：清空当前组字（对照安卓 ClearComposition；同硬件
+        // ESCAPE 键的既有语义：composer.clear + 收面板 + 刷新）。
+        case 'clearComposition':
+          if (this.composer.composing) {
+            this.composer.clear();
+            this.expanded = false;
+            this.refreshKeyboard();
+          }
+          break;
         default: break;
       }
     }
@@ -1502,7 +1542,7 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     const rt = this.returnTitle();
     const keyCtx = new KeyContext(this.mode, this.english, this.page, this.shift,
       this.prefs.simplified, !this.english, this.spaceTitle(), rt[0], rt[1], true,
-      this.expanded && this.composer.composing);
+      this.expanded && this.composer.composing, this.composer.composing);
     return new KeyboardState(
       this.look,
       keyCtx,

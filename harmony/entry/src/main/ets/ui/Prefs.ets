@@ -68,6 +68,8 @@ export class Prefs {
   private mirrorRaw: string = '';
   /** 镜像内容的内存副本（读同步、写时整份落盘）。 */
   private mirror: Map<string, string | number | boolean> = new Map();
+  /** 上一次 syncMirror 成功读盘的时刻（ms）；500ms 内的 getter 跳过重复读盘。 */
+  private lastSyncAt: number = 0;
 
   /** 在拿到 Context 后调用一次。 */
   async init(context: common.Context): Promise<void> {
@@ -91,6 +93,8 @@ export class Prefs {
     this.mirrorPath = Prefs.resolveMirror(context);
     // 镜像优先：文件里的值比本进程 Preferences 缓存新。
     this.loadMirror();
+    // 重新 init 后允许下一次 getter 立即同步一次镜像。
+    this.lastSyncAt = 0;
     // 【跨进程同步修复】Preferences 落盘 XML 是两个进程共享的权威存储：
     // 设置页（main 进程）写入 → IME 进程的镜像文件读不到（filesDir 进程隔离），
     // 但 XML 是同一份。所以【每次 init 都读 XML 并覆盖镜像】——只在本进程没有
@@ -264,6 +268,17 @@ export class Prefs {
             const next = new Map<string, string | number | boolean>();
             const all = payload.all;
             for (const k of Object.keys(all)) next.set(k, all[k]);
+            // 【自环去重】快照与当前内存副本逐键全等（IME 进程自己 put 触发的
+            // 广播回环）时直接返回：跳过对同值的 17 次 store.put + flush 和一次
+            // onChange 重刷（put 的交互路径已同步刷新过 UI）。设置页真实广播
+            // 至少一键不同，照常穿透走完整路径。
+            if (next.size === this.mirror.size) {
+              let same: boolean = true;
+              next.forEach((v: string | number | boolean, k: string) => {
+                if (this.mirror.get(k) !== v) same = false;
+              });
+              if (same) return;
+            }
             this.mirror = next;
             hilog.info(0x0000, 'MeowpuutPrefs', `received settings broadcast: ${payload.key}=${payload.value} (${next.size} keys)`);
             // 【冷启动恢复】把广播快照持久化进本进程沙盒：IME 重启后（此时设置页
@@ -304,8 +319,14 @@ export class Prefs {
 
   private syncMirror(): void {
     if (this.mirrorPath === null) return;
+    // 【热路径节流】镜像文件只做本进程持久化（filesDir 进程隔离，见文件头注释），
+    // 本进程写路径 saveMirror 已同步更新内存 mirrorRaw，读盘结果恒等于内存副本；
+    // 这里保留读盘兜底未知第三写者，但 500ms 内只读一次，消掉每次按键
+    // buildState 多次 getter 触发的真实同步文件读。
+    if (Date.now() - this.lastSyncAt < 500) return;
     try {
       const raw = fileIo.readTextSync(this.mirrorPath);
+      this.lastSyncAt = Date.now();
       if (raw === this.mirrorRaw) return;
       this.mirrorRaw = raw;
       this.parseInto(raw);
@@ -330,6 +351,8 @@ export class Prefs {
         fileIo.closeSync(file);
       }
       this.mirrorRaw = raw;
+      // 本进程刚写盘：清零节流，允许下一次 getter 立即重新同步一次。
+      this.lastSyncAt = 0;
     } catch (e) {
       const err = e as BusinessError;
       console.warn(`Meowpuut: settings mirror write failed ${err.message}`);

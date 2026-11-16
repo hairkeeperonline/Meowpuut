@@ -54,6 +54,16 @@ export class Look {
   readonly keyboardHeight: string;
   /** 视觉特效档位（对应 Android effects：lightweight/standard/extreme）。 */
   readonly effects: string;
+  /** 【优化 round 64】构造时算好的胶囊双色（原 pill getter 每帧重算 + 新数组分配）。 */
+  readonly pill: [string, string];
+  /** 【优化 round 64】构造时算好的强调色（原 accent getter 每帧经 pill getter 链式重算）。 */
+  readonly accent: string;
+  /** 【优化 round 64】构造时算好的玻璃填充色（原 glassFill getter 每帧拼字符串）。 */
+  readonly glassFill: string;
+  /** 【优化 round 64】构造时算好的玻璃水焦色组（原 causticColors getter 每帧新建数组）。 */
+  readonly causticColors: string[];
+  /** 【优化 round 64】构造时算好的玻璃描边色（原 rim getter 每帧重算 lighten）。 */
+  readonly rim: string;
   constructor(dark: boolean, shape: GlassShape, palette: Palette, strength: GlassStrength, cats: boolean,
     pillOverride: string | null = null, opaque: boolean = false, keyPopups: boolean = true,
     keyboardHeight: string = 'standard', effects: string = 'standard') {
@@ -67,6 +77,35 @@ export class Look {
     this.keyPopups = keyPopups;
     this.keyboardHeight = keyboardHeight;
     this.effects = effects;
+    // 【优化 round 64】派生色一律在构造时算定（Look 实例由 ability 换肤/切深浅色时
+    // 才重建，渲染热路径上只读字段访问）。数值路径与原 getter 完全一致，视觉不变。
+    this.pill = pillOverride !== null ? [lighten(pillOverride, 0.14), pillOverride] :
+      palettePill(palette, dark);
+    this.accent = this.pill[1];
+    this.glassFill = Look.computeGlassFill(dark, strength, this.effectAlphaScale, opaque);
+    this.rim = dark ? lighten(paletteColor(palette, dark), 0.25) : '#FFFFFFFF';
+    if (dark) {
+      const tint = paletteColor(palette, dark);
+      this.causticColors = [tint, lighten(tint, 0.45), darken(tint, 0.12), lighten(tint, 0.45)];
+    } else {
+      this.causticColors = ['#FFFFB8D2', '#FFFFD9B0', '#FFFFF4B8', '#FFC9F2DD', '#FFBFD9FF', '#FFDCC8FF'];
+    }
+  }
+
+  /** 【优化 round 64】glassFill 的纯计算（原 getter 逻辑原样搬移，供构造函数一次性调用）。 */
+  private static computeGlassFill(dark: boolean, strength: GlassStrength, alphaScale: number,
+    opaque: boolean): string {
+    if (opaque) return dark ? '#FF2B2729' : '#FFF4F2F6';
+    let alpha: number;
+    switch (strength) {
+      case GlassStrength.SOFT: alpha = dark ? 0.74 : 0.60; break;
+      case GlassStrength.VIVID: alpha = dark ? 0.50 : 0.32; break;
+      default: alpha = dark ? 0.62 : 0.46; break;
+    }
+    // effects=extreme 更通透：额外降低 alpha。
+    alpha = Math.min(1, Math.max(0, alpha * alphaScale));
+    const rgb = dark ? 0x3A302C : 0xFFFFFF;
+    return `#${toHex2(Math.round(alpha * 255))}${toHex6(rgb)}`;
   }
 
   /** 键盘高度缩放系数（short=0.88 / standard=1.0 / tall=1.12）。 */
@@ -101,36 +140,11 @@ export class Look {
   get candidateSecondary(): string { return this.dark ? '#FFCCC2BA' : '#FF7A7072'; }
   get balloonFace(): string { return this.dark ? '#FF6B6A70' : '#FFFFFFFF'; }
 
-  get pill(): [string, string] {
-    if (this.pillOverride !== null) return [lighten(this.pillOverride, 0.14), this.pillOverride];
-    return palettePill(this.palette, this.dark);
-  }
-
-  get accent(): string { return this.pill[1]; }
-
-  get glassFill(): string {
-    if (this.opaque) return this.dark ? '#FF2B2729' : '#FFF4F2F6';
-    let alpha: number;
-    switch (this.strength) {
-      case GlassStrength.SOFT: alpha = this.dark ? 0.74 : 0.60; break;
-      case GlassStrength.VIVID: alpha = this.dark ? 0.50 : 0.32; break;
-      default: alpha = this.dark ? 0.62 : 0.46; break;
-    }
-    // effects=extreme 更通透：额外降低 alpha。
-    alpha = Math.min(1, Math.max(0, alpha * this.effectAlphaScale));
-    const rgb = this.dark ? 0x3A302C : 0xFFFFFF;
-    return `#${toHex2(Math.round(alpha * 255))}${toHex6(rgb)}`;
-  }
+  // 【优化 round 64】pill/accent/glassFill/rim/causticColors 已改为构造时算好的
+  // readonly 字段（见构造函数），热路径上不再每帧重算——调用方 look.pill 等字段
+  // 访问语法不变。tint 仍为 getter（仅 SettingsPage 预览用，不在渲染热路径）。
 
   get tint(): string { return paletteColor(this.palette, this.dark); }
-
-  get rim(): string { return this.dark ? lighten(this.tint, 0.25) : '#FFFFFFFF'; }
-
-  get causticColors(): string[] {
-    return this.dark
-      ? [this.tint, lighten(this.tint, 0.45), darken(this.tint, 0.12), lighten(this.tint, 0.45)]
-      : ['#FFFFB8D2', '#FFFFD9B0', '#FFFFF4B8', '#FFC9F2DD', '#FFBFD9FF', '#FFDCC8FF'];
-  }
 }
 
 function palettePill(p: Palette, dark: boolean): [string, string] {

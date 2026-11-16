@@ -385,7 +385,7 @@
 | `MeowpuutIME.kt` ↔ `MeowpuutAbility.ets` | 全部 54 方法（输入/候选/空格句号/删除/英文/翻页/符号/自动大写 + 硬键盘）| ✅ 已穷尽，硬键盘/光标清空组字/语音播报本轮补齐 |
 | `Keys.kt` ↔ `Keys.ets` | 键集合/注音位/字母页/符号页×4/长按 accent+symbol/autoReturnMarks | ✅ 逐项一致 |
 | `KeyStates.kt` ↔ `KeyStates.ets` | Shift 三态双击锁定/自动大写/Delete 连发节奏 | ✅ 一致 |
-| `KeyTouches.kt` ↔ `KeyTouches.ets` | 触摸状态机（rollover/slide/长按备选/光标/删除/activate）| ✅ 一致 |
+| `KeyTouches.kt` ↔ `KeyTouches.ets` | 触摸状态机（rollover/slide/长按备选/光标/删除）| ✅ 一致 |
 | `KeysView.kt` ↔ `MeowpuutKeyboard.ets`（键绘制）| 键面颜色分支/1dp 底边/键面渐变/标签颜色/icon 尺寸/小写上移 0.04h/超宽缩字号/光标模式键面淡出 | ✅ 一致（光标模式键面 alpha 170 + 标签隐藏 + 气泡字号 34/28/24 分支本轮补齐）|
 | `Theme.kt` ↔ `Theme.ets` | 全部颜色/玻璃 alpha/明暗算法 | ✅ 一致 |
 | `Geometry.kt` ↔ `Geometry.ets` | KeyMetrics/CandidateRegionLayout/stage | ✅ 一致 |
@@ -1482,3 +1482,36 @@ if (this.composer.composing && this.lastPreviewAt > 0 &&
 **追加修复 4（同轮）**：九键底行对齐安卓原版——此前是自造的「符號/空格/刪除/換行」四键，缺 123 数字键盘与中英切换。现对齐安卓 nineKeyBottom：`符號(1.2) | 123(1.0) | 空格(flex) | 中英切换(1.0) | 换行(1.65)`；删除键位置对照安卓在行 1 右端（side 列）。新增九键专属数字页（NUMERIC_PAGE=9，避开 1/2 通用符号与 3-8 emoji 分类）：3×4 数字 + 标点环绕 + 底行 `九键 | , | 0 | . | 换行`，对照安卓 nineKeyNumbers。
 
 **追加修复 5（同轮）**：设置页顶部「喵扑」渐隐 + 色系统一——systemMaterial 系统玻璃在真机渲染成与页面不一致的独立色带。改为：自定义品牌标题（喵扑 26vp 粗体 + Meowpuut 14vp，textPrimary/secondaryText 同源配色，透明底）；Navigation 与内容区统一 pageBg 背景；内容顶部加 40vp 渐隐遮罩（pageBg→透明，hitTest 穿透），滚动内容在标题下柔和消失；清除 uiMaterial 死代码。
+
+## Round 64 — 性能优化（团队并行）+ 键位布局与安卓全对齐
+
+**背景**：用户反馈「莫名其妙会变卡」。4 个只读审计 agent 定位三大根源：①键盘页 16ms 轮询每 tick 固定 `new` 3 个快照对象（空闲态 60Hz ≈ 180 对象/秒持续喂 GC）；②每次按键 buildState 触发 4-5 次 Prefs getter 同步磁盘读（syncMirror 每次整读镜像 JSON）+ returnTitle 一次 `getEditorAttributeSync` 跨进程 IPC；③候选栏短动画（lean/粒子/toast/胶囊滑动）`drawTick++` 连带键区画布整帧重绘（每个 toast ≈ 144 帧无效 drawKeys）。实施阶段 4 个 agent 按互斥文件范围并行落地（render/prefs/ability/host），lead 集成接线。
+
+**性能（全部行为保持，像素输出不变）**：
+1. **轮询零分配**：KeyboardHost 新增 4 个只读 token getter（stateToken/committedToken/petToken/announceToken），pollHost 先比 token 再 take——空闲时不再分配任何快照对象（token 计数字段改 `_` 前缀避开与 getter 同名的 duplicate identifier，沿用 KeyTouches._cursorMode 既有约定）
+2. **定时器生命周期**：setInterval 句柄存入成员 pollTimer，新增 aboutToDisappear 清理（轮询 + 全部动画计时器 + pressedTimer——此前永不清理，面板重建即泄漏一条 16ms 循环）
+3. **短动画只重绘候选栏**：lean/粒子/toast/胶囊滑动四类动画直呼 drawCandidateBar()，不再 drawTick++ 触发两块画布整帧；15 处影响键区的 drawTick++ 路径逐一保留未动
+4. **Prefs 热路径 I/O 消除**：syncMirror 500ms 时间节流（镜像文件本进程独写、读盘恒等于内存副本；saveMirror 写盘与 init 后清零节流强制重新同步，首次调用必同步）+ subscribe 回调自环去重（快照与内存全等直接返回，跳过 17 次 store.put + flush + onChange；设置页真实广播至少一键不同照常穿透）
+5. **回车键 IPC 缓存**：enterKeyType 在 inputStart 探测预览能力时顺手回填（字段名以 SDK d.ts:2699 确认），returnTitle 命中缓存即免每次键盘刷新的 getEditorAttributeSync；-1 哨兵退回原实时查询（EnterKeyType 枚举 0-8 全非负，无冲突）
+6. **Look 派生色预计算**：pill/accent/glassFill/causticColors/rim 五个 getter 改为构造时算好的 readonly 字段（换肤/切深浅色才重建实例，热路径纯字段读取）
+7. **帧内复用与缓存**：drawCandidateBar 的 seats 单次计算传参给 pawShadows/drawCats/drawParticles；stepParticles 改倒序 splice 就地删除；pxRatio 结果缓存（onAreaChange/rebuild 失效）；catPixelSize Map 缓存贴图物理尺寸（decodeCats/loadFestivalArt 回填，查表替代每帧 getImageInfoSync）
+8. **展开面板排版脏标记**：panelLayoutToken/panelLayoutWidth 未变不 layoutPanel（每帧仅保留滚动 clamp）
+9. **画布与触摸守卫**：键区画布 keysReady 守卫（onReady 前不 drawKeys）；KeyTouches.isPressed 空表早退（空闲动画帧免每键闭包分配）
+10. **onDestroy 清理补全**：keySounds.release()（SoundPool 此前泄漏到进程结束）+ hwDelegate 两个回调提为类字段后用同一引用 off 反注册
+11. **死代码清理**：KeyTouches.cancelAll/activate/active getter（全仓 grep 零调用者）、MeowpuutKeyboard.refresh() 死入口的面板缓存兜底
+
+**键位布局与安卓完全对齐（用户点名要求「相对元素位置完全一致」，逐项对照 Android main 分支 Keys.kt/KeyboardView/KeysView）**：
+1. **九键主页五列结构**：行 1-3 每行 `[左标点(！。？) | 三个数字键 | 右功能键]`，右列 删除|重输|0——修复 round 63-4 把删除键移出底行却没放进侧列、九键主页完全无法退格的回归；「重输」=新 KeyActionClearComposition（清组字+收面板，同硬件 ESCAPE 语义，组字中才可用；KeyContext 补 composing 字段）
+2. **九键底行条件槽位**：`符號(1.2) | 123(1.0) | (地球0.9) | 空格(flex) | 中英(1.0) | (展开时删除0.95) | 换行(1.65)`——地球与展开删除两个条件槽此前缺失
+3. **referenceColumns 3→10**（九键主页+数字页）：修复含弹性空格的底行以 1/3 行宽为基准单位计算导致整行溢出屏幕（用户「九键底行还是不对」的深层根因，round 60 起就存在）；数字页行被自动缩到 29% 意图宽度的问题同修
+4. **九键键义对齐**：「1」键=分词（Engine(') 拼音分隔音符，长按备选上屏「1」；原为 iOS 风格上屏句号）；数字键主标字母组、上方角标数字（对照安卓 KeysView.layoutLabels 堆叠式：digit ≤ min(11, h×0.34) 在上、group ≤ min(19, h×0.54) 在下、整体垂直居中、超高 fit 收缩；原为 iOS 风格数字居中+字母组垫底）、长按备选上屏数字（typeEngine 的 alternate 上屏路径两平台语义一致，直接复用）
+5. **符号页结构**：第 2 页行首「123」回数字页（九键模式进九键数字页，对照 `nine ? NUMERIC_PAGE : 1`）；☺ 表情键从行首移到底行第二位（对照安卓 emoji 键位，`back | ☺ | (地球) | 空格 | 换行`）；emoji 页内 ☺ 高亮 ACCENT、行首键循环分类（鸿蒙增强保留：安卓 0.9.1 表情在展开面板而非键页，仅入口位置对齐）
+6. **符号内容四分支**：补日文页（ー「」『』・♪ 等）与简繁分支（简体 ¥+“”／繁体 $+「」，此前固定简体）
+7. **maximumWidth=460**（九键主页+数字页）：KeySet 新增字段 + layoutKeyGrid 收窄后整体水平居中（对照安卓 `layoutWidth()` + `KeyboardView.onLayout` 的 keyLeft 居中）——宽屏/横屏下九键不再拉满全宽
+8. **toggleKey 九键分支**：中文态「英」、英文态「中」（对照 Keys.kt toggleKey；其余模式 拼ㄅあ/ABC 不变）
+9. **build() 路由核对**：与安卓逐分支一致（NUMERIC_PAGE→数字页、page>0→符号、注音→注音键盘、九键→九键、其余 letters；日文模式同为 QWERTY+shift 片假名）
+10. 数字页左列中格 needsGlobe 时放地球键（对照 nineKeyNumbers marks 列）、KeySet.page 补传 NUMERIC_PAGE（KeyTouches 触控状态追踪更准）；地球键 spoken 统一为「選擇系統鍵盤/选择系统键盘」
+
+**遗留（下轮候选）**：OffscreenCanvas 玻璃静态层缓存（~2800 Point2D/帧的 traceOutline，风险高需真机验证）；Prefs.unsubscribe（订阅对象为私有字段，onDestroy 泄漏轻微）；editorAction() 的实时 getEditorAttributeSync 可用 enterKeyTypeCached 同法收敛；TouchHost.clearVisuals 因 cancelAll 删除成为新死接口；九键 maximumWidth 仅对宽屏生效（手机竖屏 <460dp 无视觉差异）。
+
+**验证**：hvigor 全量编译通过（ArkTS 严格类型检查含）。真机复验点：①九键新结构（侧列删除/重输、「1」=分词、长按 ABC 出 2、底行地球与展开删除）②符号页翻页（#+=↔123）与底行 ☺ 入口 ③空闲挂机 5 分钟再打字无变卡 ④连续打字跟手度 ⑤物理键盘 onDestroy 后无残留监听（hilog）。

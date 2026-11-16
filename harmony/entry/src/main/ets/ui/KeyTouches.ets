@@ -91,7 +91,6 @@ export class KeyTouches {
   constructor(host: TouchHost) { this.host = host; }
 
   get cursorMode(): boolean { return this._cursorMode; }
-  get active(): boolean { return this.pointers.size > 0; }
 
   layout(set: KeySet, placements: KeyPlacement[][], width: number, sameShape: boolean): void {
     this.keySet = set;
@@ -132,6 +131,8 @@ export class KeyTouches {
   }
 
   isPressed(row: number, column: number): boolean {
+    // 【性能 round 64】空表早退：drawKeys 每帧每键各调一次，空闲动画帧免掉整轮无意义的闭包分配。
+    if (this.pointers.size === 0) return false;
     let found = false;
     this.pointers.forEach((p: Pointer) => {
       if (p.pressing && p.row === row && p.column === column) found = true;
@@ -342,17 +343,6 @@ export class KeyTouches {
     }
   }
 
-  cancelAll(): void {
-    // 收集所有指针再逐个 retire（替代 [...this.pointers.values()]）。
-    const allPointers: Pointer[] = [];
-    this.pointers.forEach((p: Pointer) => { allPointers.push(p); });
-    for (let i = 0; i < allPointers.length; i++) this.retire(allPointers[i]);
-    this.pointers.clear();
-    this.stopDelete();
-    this.host.clearVisuals();
-    this.host.redraw();
-  }
-
   private showPressed(p: Pointer): void {
     if (p.key.preview && p.key.isCharacter) this.host.showBalloon(p.id, p.key, p.frame);
     else this.host.hideBalloon(p.id);
@@ -444,23 +434,6 @@ export class KeyTouches {
     this.deleteRepeat = -1;
     // 使任何在途闭包失活（cancel 掉的定时器若已入队也不再生效）。
     this.deleteRun++;
-  }
-
-  activate(row: number, column: number): void {
-    const key = this.keyOf(row, column);
-    if (key === null || !key.enabled) return;
-    this.listener?.onKeyDown(key);
-    const action = key.action;
-    if (action instanceof KeyActionShift) {
-      this.listener?.onShiftDown();
-      this.listener?.onShiftUp(false);
-    } else if (action instanceof KeyActionDelete) {
-      this.listener?.onDelete(false);
-    } else if (action instanceof KeyActionPage) {
-      this.listener?.onPage(action.page);
-    } else {
-      this.listener?.onKey(key, null);
-    }
   }
 
   static readonly ALTERNATES_DELAY = 450;

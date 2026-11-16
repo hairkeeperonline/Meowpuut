@@ -236,6 +236,8 @@ export struct MeowpuutKeyboard {
   @State private kbHeight: number = 720;
   timerCounter: number = 0;
   timers: Map<number, number> = new Map();
+  /** 【优化 round 64】pollHost 的 setInterval 句柄（aboutToDisappear 里 clearInterval，防面板销毁后轮询空转）。 */
+  private pollTimer: number = -1;
   private motions: Map<string, CatMotion> = new Map();
   /** 组字时猫向候选方向倾斜的进度 0~1（对照 Android animateLean，米米莫 +2.5°/莫莫 −2.5°）。 */
   private lean: number = 0;
@@ -250,6 +252,12 @@ export struct MeowpuutKeyboard {
   /** 摸猫喷发的粒子（对照 Android CandidateBarView.particles，上限 8）。 */
   private particles: Particle[] = [];
   canvasReady: boolean = false;
+  /** 【优化 round 64】键区画布是否 onReady：未就绪时 drawKeys 的绘制指令无效，跳过省一整轮遍历。 */
+  private keysReady: boolean = false;
+  /** 【优化 round 64】pxRatio() 结果缓存（-1 = 未算）：densityDPI 读取 + 除法每帧多次，命中缓存直返。 */
+  private cachedPxRatio: number = -1;
+  /** 【优化 round 64】贴图物理像素尺寸缓存（name → [宽, 高]）：drawCatImage 每帧 getImageInfoSync 的替代。 */
+  private catPixelSize: Map<string, number[]> = new Map();
   private barSettings: RenderingContextSettings = new RenderingContextSettings(true);
   private barCtx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.barSettings);
   private keySettings: RenderingContextSettings = new RenderingContextSettings(true);
@@ -319,6 +327,9 @@ export struct MeowpuutKeyboard {
   private panelCells: PanelCell[] = [];
   private panelContentHeight: number = 0;
   private panelScroll: number = 0;
+  /** 【优化 round 64】展开面板排版缓存：上次 layoutPanel 用的候选 token / 宽度，都未变则跳过重排。 */
+  private panelLayoutToken: number = -1;
+  private panelLayoutWidth: number = -1;
   private panelDragId: number = -1;
   private panelDownY: number = 0;
   private panelDownScroll: number = 0;
@@ -335,6 +346,21 @@ export struct MeowpuutKeyboard {
     // 不启动这个轮询，界面会一直停在首帧快照：打键不出候选、点候选也拿不到列表。
     this.pollHost();
     this.loadCatSprites();
+  }
+
+  /** 【优化 round 64】面板销毁时清理轮询/挂起定时器：不清理则句柄泄漏、回调继续空转。 */
+  aboutToDisappear(): void {
+    if (this.pollTimer >= 0) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = -1;
+    }
+    // 触摸状态机的挂起定时器（长按备选、连删链等）逐个清掉。
+    this.timers.forEach((t: number) => { clearTimeout(t); });
+    this.timers.clear();
+    if (this.pressedTimer >= 0) {
+      clearTimeout(this.pressedTimer);
+      this.pressedTimer = -1;
+    }
   }
 
   /**
@@ -389,6 +415,8 @@ export struct MeowpuutKeyboard {
           this.catPixels.set(name, pm);
           ok++;
           const info = source.getImageInfoSync();
+          // 【优化 round 64】顺手缓存贴图物理像素尺寸，drawCatImage 每帧 getImageInfoSync 改查 Map。
+          this.catPixelSize.set(name, [info.size.width, info.size.height]);
           hilog.info(0x0000, 'MeowpuutCat', `${name}: ok ${info.size.width}x${info.size.height}`);
         } else {
           hilog.error(0x0000, 'MeowpuutCat', `${name}: createPixelMap returned undefined`);
@@ -427,6 +455,13 @@ export struct MeowpuutKeyboard {
           remaining--;
           if (err === undefined && pm !== undefined) {
             this.festivalPixels.set(name, pm);
+            // 【优化 round 64】缓存节日贴图物理像素尺寸（drawFestivalEnd 每帧 getImageInfoSync 改查 Map）。
+            try {
+              const info = pm.getImageInfoSync();
+              this.catPixelSize.set(name, [info.size.width, info.size.height]);
+            } catch (e) {
+              // 尺寸获取失败不阻断加载：drawFestivalEnd 会回退 getImageInfoSync。
+            }
           }
           if (remaining <= 0) {
             this.festivalLoading = false;
@@ -450,37 +485,49 @@ export struct MeowpuutKeyboard {
   private lastAnnounceToken = -1;
 
   private pollHost(): void {
-    setInterval(() => {
+    this.pollTimer = setInterval(() => {
       const host = KeyboardHost.get();
-      const t = host.take();
-      if (t.state !== null && t.token !== this.lastStateToken) {
-        this.lastStateToken = t.token;
-        this.state = t.state;
-        this.rebuild();
-        // state 是普通成员，改了不会自己触发重绘；drawTick 是 @State，靠它刷新。
-        this.drawTick++;
+      // 【优化 round 64】先比 token 再快照（KeyboardHost 只读 getter）：
+      // 空闲时零对象分配——此前每 tick 固定 new 3 个快照，60Hz 下 ~180 对象/秒
+      // 持续喂 GC，是「莫名其妙变卡」的主因之一。token 变化才 take，行为等价
+      // （take* 均为纯读取，无破坏性消费）。
+      if (host.stateToken !== this.lastStateToken) {
+        const t = host.take();
+        if (t.state !== null) {
+          this.lastStateToken = t.token;
+          this.state = t.state;
+          this.rebuild();
+          // state 是普通成员，改了不会自己触发重绘；drawTick 是 @State，靠它刷新。
+          this.drawTick++;
+        }
       }
-      const c = host.takeCommitted();
-      if (c !== this.lastCommitToken) {
-        this.lastCommitToken = c;
+      if (host.committedToken !== this.lastCommitToken) {
+        this.lastCommitToken = host.committedToken;
         this.committed();
       }
-      const p = host.takePet();
-      if (p.token !== this.lastPetToken) {
+      if (host.petToken !== this.lastPetToken) {
+        const p = host.takePet();
         this.lastPetToken = p.token;
         this.pet(p.cat, p.toast, p.hearts);
       }
-      const a = host.takeAnnounce();
-      if (a.token !== this.lastAnnounceToken) {
+      if (host.announceToken !== this.lastAnnounceToken) {
+        const a = host.takeAnnounce();
         this.lastAnnounceToken = a.token;
         this.announce(a.text);
       }
       // 持续推进 lean 动画与粒子，并让活跃中的短动画持续重绘。
       this.stepLean();
       this.stepParticles();
-      if (this.lean !== this.leanTo || this.particles.length > 0 || Date.now() < this.toastExpires ||
-        Date.now() < this.pillAnimStart + MeowpuutKeyboard.PILL_SLIDE_MS) {
-        this.drawTick++;
+      // 【优化 round 64】now 只取一次：原条件里 toastExpires / pillAnimStart 各调一次 Date.now()。
+      const now = Date.now();
+      if (this.lean !== this.leanTo || this.particles.length > 0 || now < this.toastExpires ||
+        now < this.pillAnimStart + MeowpuutKeyboard.PILL_SLIDE_MS) {
+        // 【优化 round 64】这四类动画（lean/粒子/toast/胶囊滑动）只画在候选栏画布上，
+        // 不再 drawTick++ 触发整帧（键区 Canvas 无关）——直呼 drawCandidateBar 省
+        // 一整轮 drawKeys。键区仍由 state 分支（上方 drawTick++）刷新。
+        if (this.canvasReady) {
+          this.drawCandidateBar();
+        }
       }
     }, 16);
   }
@@ -520,6 +567,9 @@ export struct MeowpuutKeyboard {
     }
     if (rowChanged) this.barScroll = 0;
     this.state = next;
+    // 【优化 round 64】refresh 不经过 lastStateToken（当前无调用方，防患于未然）：
+    // 直接失效展开面板排版缓存，确保未来启用时候选变了必重排。
+    this.panelLayoutToken = -1;
     this.rebuild();
   }
 
@@ -596,8 +646,10 @@ export struct MeowpuutKeyboard {
 
   /** drawTick 变了就重画。Canvas 的绘制指令不会因为 @State 变化自己重放。 */
   private onDrawTick(): void {
+    // 【优化 round 64】键区画布未 onReady 时跳过 drawKeys：指令落在未初始化的
+    // Canvas 上是纯开销；bar 画布就绪与否原有守卫保持不变。
     if (this.canvasReady) this.drawCandidateBar();
-    this.drawKeys();
+    if (this.keysReady) this.drawKeys();
   }
 
   /**
@@ -654,7 +706,13 @@ export struct MeowpuutKeyboard {
   private stepParticles(): void {
     if (this.particles.length === 0) return;
     const now = Date.now();
-    this.particles = this.particles.filter((p) => now - p.start < p.span);
+    // 【优化 round 64】倒序 splice 就地删除，替代 filter 整组重建（每帧一次新数组分配）。
+    // 倒序保证删除时下标不漂移；存活粒子的相对顺序与 filter 结果一致，绘制顺序不变。
+    for (let i = this.particles.length - 1; i >= 0; i--) {
+      if (now - this.particles[i].start >= this.particles[i].span) {
+        this.particles.splice(i, 1);
+      }
+    }
   }
 
   announce(text: string): void {
@@ -690,6 +748,8 @@ export struct MeowpuutKeyboard {
 
   private rebuild(): void {
     const ctx = this.state.keyCtx;
+    // 【优化 round 64】布局重建时失效像素比缓存（兜底：跨屏迁移/旋转后 density 可能变化）。
+    this.cachedPxRatio = -1;
     // 组字状态变化时，猫向候选方向倾斜（对照 Android animateLean，320ms 缓动）。
     if (this.state.composing !== this.lastComposing) {
       this.lastComposing = this.state.composing;
@@ -712,7 +772,10 @@ export struct MeowpuutKeyboard {
       this.metrics = new KeyMetrics(m.sideMargin, m.keyGap, Math.max(1, Math.round(m.keyHeight * scale)),
         m.rowGap, m.topPadding, m.bottomPadding, m.cornerRadius, m.letterFont, m.utilityFont);
     }
-    this.placements = layoutKeyGrid(keySet.specs, this.kbWidth, keySet.referenceColumns, this.metrics);
+    // 【round 64】传入 KeySet.maximumWidth（九键 460dp）：宽于上限的屏幕上键区
+    // 收窄并整体水平居中（对照安卓 KeyboardView.onLayout 的 keyLeft 居中）。
+    this.placements = layoutKeyGrid(keySet.specs, this.kbWidth, keySet.referenceColumns, this.metrics,
+      keySet.maximumWidth !== null ? keySet.maximumWidth : 0);
     this.touches?.layout(keySet, this.placements, this.kbWidth, true);
     // rebuild 会把 metrics 重置成固定键高，这里立刻补一次撑满，否则轮询刷新后面板底部又出现死区。
     this.drawTick++;
@@ -736,9 +799,14 @@ export struct MeowpuutKeyboard {
    * 而路径/文字仍按 vp。所有 drawImage(PixelMap) 的目标坐标须乘该倍数折算。
    */
   private pxRatio(): number {
+    // 【优化 round 64】结果缓存：densityDPI 不随帧变（仅窗口跨屏迁移才可能变），
+    // 命中直接返回；rebuild/onAreaChange 时置 -1 失效兜底。
+    if (this.cachedPxRatio > 0) return this.cachedPxRatio;
     try {
       const disp = display.getDefaultDisplaySync();
-      return disp.densityDPI / 160;
+      const ratio = disp.densityDPI / 160;
+      this.cachedPxRatio = ratio;
+      return ratio;
     } catch (e) {
       return 3;
     }
@@ -762,7 +830,8 @@ export struct MeowpuutKeyboard {
     if (keyHeight <= m.keyHeight) return;
     this.metrics = new KeyMetrics(m.sideMargin, m.keyGap, keyHeight, m.rowGap,
       m.topPadding, m.bottomPadding, m.cornerRadius, m.letterFont, m.utilityFont);
-    this.placements = layoutKeyGrid(this.keySet.specs, this.kbWidth, this.keySet.referenceColumns, this.metrics);
+    this.placements = layoutKeyGrid(this.keySet.specs, this.kbWidth, this.keySet.referenceColumns, this.metrics,
+      this.keySet.maximumWidth !== null ? this.keySet.maximumWidth : 0);
     this.touches?.layout(this.keySet, this.placements, this.kbWidth, true);
   }
 
@@ -802,6 +871,8 @@ export struct MeowpuutKeyboard {
         .width('100%')
         .layoutWeight(1)
         .onReady(() => {
+          // 【优化 round 64】记录键区画布就绪，onDrawTick 据此跳过未就绪时的无效绘制。
+          this.keysReady = true;
           this.drawKeys();
         })
         .onTouch((event: TouchEvent) => {
@@ -838,6 +909,8 @@ export struct MeowpuutKeyboard {
       if (Math.abs(w - this.kbWidth) > 1 || Math.abs(h - this.kbHeight) > 1) {
         this.kbWidth = w;
         this.kbHeight = h;
+        // 【优化 round 64】尺寸变化时失效像素比缓存（窗口可能迁移到不同 density 的屏）。
+        this.cachedPxRatio = -1;
         this.rebuild();
         // 面板尺寸确定后，把键高撑满剩余空间，消除底部死区。
         this.drawTick++;
@@ -1008,7 +1081,11 @@ export struct MeowpuutKeyboard {
       if (token !== this.barFlingId) return;
       this.barVel *= 0.92;
       this.barScroll = Math.min(this.barMaxScroll, Math.max(0, this.barScroll + this.barVel * 16));
-      this.drawTick++;
+      // 【优化 round 64】惯性滚动只移动候选行内容（drawRow 的 barScroll 平移），
+      // 直呼 drawCandidateBar 替代 drawTick++，省掉整帧键区重绘。
+      if (this.canvasReady) {
+        this.drawCandidateBar();
+      }
       if (Math.abs(this.barVel) > 0.01 && this.barScroll > 0 && this.barScroll < this.barMaxScroll) {
         setTimeout(step, 16);
       }
@@ -1023,11 +1100,17 @@ export struct MeowpuutKeyboard {
   /** 记一次按下反馈：先亮出按下态，约一帧后再提交，这样用户能看到形变。 */
   private flashPress(n: number, commit: () => void): void {    this.pressedCandidate = n;
     if (this.pressedTimer >= 0) { clearTimeout(this.pressedTimer); this.pressedTimer = -1; }
-    this.drawTick++;
+    // 【优化 round 64】pressedCandidate 高亮只画在候选栏画布（drawRow 的按下底/缩放），
+    // 直呼 drawCandidateBar 替代 drawTick++，省掉整帧键区重绘。
+    if (this.canvasReady) {
+      this.drawCandidateBar();
+    }
     this.pressedTimer = setTimeout(() => {
       this.pressedCandidate = -1;
       this.pressedTimer = -1;
-      this.drawTick++;
+      if (this.canvasReady) {
+        this.drawCandidateBar();
+      }
       commit();
     }, 70) as number;
   }
@@ -1120,9 +1203,14 @@ export struct MeowpuutKeyboard {
     // 玻璃。
     GlassPainter.shadow(ctx, look.shape, region.glass, look.dark);
     GlassPainter.body(ctx, look.shape, region.glass, look);
+    // 【优化 round 64】seats 一帧只算一次，传参给爪影/猫/粒子（原先每处各自调
+    // this.seats()，一帧最多 3 次重复落座计算）；座位几何只依赖 region/look/festival，
+    // 同帧内恒相同，复用结果像素不变。
+    const showCats = region.cats && look.cats;
+    const seats: CatPlacement[] = showCats ? this.seats(region, look) : [];
     // 爪子在玻璃上的软阴影（对照 Android pawShadows，画进玻璃体之后）。
-    if (region.cats && look.cats) {
-      this.pawShadows(ctx, region, look);
+    if (showCats) {
+      this.pawShadows(ctx, region, look, seats);
     }
 
     // 节日：加载换装猫/饰簇贴图，然后画右端饰簇（玻璃上、猫与候选下）。
@@ -1140,12 +1228,12 @@ export struct MeowpuutKeyboard {
     this.drawRow(ctx, region, look);
 
     // 猫咪（最上层，完整绘制不被任何东西遮挡）。
-    if (region.cats && look.cats) {
-      this.drawCats(ctx, region, look);
+    if (showCats) {
+      this.drawCats(ctx, region, look, seats);
     }
 
     // 摸猫喷发的粒子（对照 Android drawParticles）。
-    this.drawParticles(ctx, region, look);
+    this.drawParticles(ctx, region, look, seats);
 
     // 展开箭头。
     this.drawChevron(ctx, region, look);
@@ -1190,8 +1278,10 @@ export struct MeowpuutKeyboard {
     return CatSeats.ends(stage, mimimo, momo) ?? [];
   }
 
-  private drawCats(ctx: CanvasRenderingContext2D, region: CandidateRegionLayout, look: Look): void {
-    for (const seat of this.seats(region, look)) {
+  private drawCats(ctx: CanvasRenderingContext2D, region: CandidateRegionLayout, look: Look,
+    seats: CatPlacement[]): void {
+    // 【优化 round 64】seats 由调用方算好传入（原方法内 this.seats(region, look) 每帧重算）。
+    for (const seat of seats) {
       const cat = seat.cat === Cat.MIMIMO ? 'mimimo' : 'momo';
       const motion = this.motions.get(cat);
       let pose: CatPose | null = null;
@@ -1288,9 +1378,10 @@ export struct MeowpuutKeyboard {
   }
 
   /** 摸猫喷发的粒子（对照 Android CandidateBarView.drawParticles L514-538）。 */
-  private drawParticles(ctx: CanvasRenderingContext2D, region: CandidateRegionLayout, look: Look): void {
+  private drawParticles(ctx: CanvasRenderingContext2D, region: CandidateRegionLayout, look: Look,
+    seats: CatPlacement[]): void {
     if (this.particles.length === 0) return;
-    const seats = this.seats(region, look);
+    // 【优化 round 64】seats 由调用方算好传入（原方法内 this.seats(region, look) 每帧重算）。
     const now = Date.now();
     for (const p of this.particles) {
       const t = (now - p.start) / p.span;
@@ -1339,13 +1430,15 @@ export struct MeowpuutKeyboard {
   }
 
   /** 玻璃上每只前爪下的软阴影（对照 Android pawShadows）。 */
-  private pawShadows(ctx: CanvasRenderingContext2D, region: CandidateRegionLayout, look: Look): void {
+  private pawShadows(ctx: CanvasRenderingContext2D, region: CandidateRegionLayout, look: Look,
+    seats: CatPlacement[]): void {
     ctx.save();
     this.clipInsideGlass(ctx, look, region);
     ctx.fillStyle = look.dark ? 'rgba(0,0,0,0.35)' : 'rgba(0,0,0,0.20)';
     ctx.shadowBlur = 1.5;
     ctx.shadowColor = look.dark ? 'rgba(0,0,0,0.35)' : 'rgba(0,0,0,0.20)';
-    for (const seat of this.seats(region, look)) {
+    // 【优化 round 64】seats 由调用方算好传入（原方法内 this.seats(region, look) 每帧重算）。
+    for (const seat of seats) {
       for (const paw of seat.paws) {
         const left = paw.left + 1;
         const right = paw.left + paw.width - 1;
@@ -1385,9 +1478,16 @@ export struct MeowpuutKeyboard {
    */
   private drawCatImage(ctx: CanvasRenderingContext2D, pm: image.PixelMap,
     sprite: CatSprite, frame: Box): void {
-    const info = pm.getImageInfoSync();
-    const sw = info.size.width;   // 物理像素，如 192
-    const sh = info.size.height;
+    // 【优化 round 64】物理像素尺寸查缓存 Map（decodeCats 加载时已存），
+    // 免掉每帧 getImageInfoSync；缓存缺失（异常路径）时回退同步取一次并回填。
+    let size: number[] | undefined = this.catPixelSize.get(sprite.name);
+    if (size === undefined) {
+      const info = pm.getImageInfoSync();
+      size = [info.size.width, info.size.height];
+      this.catPixelSize.set(sprite.name, size);
+    }
+    const sw = size[0];   // 物理像素，如 192
+    const sh = size[1];
     const k = this.pxRatio();
     ctx.drawImage(pm, 0, 0, sw, sh,
       frame.left, frame.top, frame.width * k, frame.height * k);
@@ -1405,9 +1505,16 @@ export struct MeowpuutKeyboard {
     const box = Festivals.placeRight(festival.right, region.glass, [band.low, band.high],
       region.width, arrowRight);
     if (box === null) return;
-    const info = pm.getImageInfoSync();
+    // 【优化 round 64】物理像素尺寸查缓存 Map（loadFestivalArt 回调里已存），
+    // 免掉每帧 getImageInfoSync；缓存缺失时回退同步取一次并回填。
+    let size: number[] | undefined = this.catPixelSize.get(festival.right.image);
+    if (size === undefined) {
+      const info = pm.getImageInfoSync();
+      size = [info.size.width, info.size.height];
+      this.catPixelSize.set(festival.right.image, size);
+    }
     const k = this.pxRatio();
-    ctx.drawImage(pm, 0, 0, info.size.width, info.size.height,
+    ctx.drawImage(pm, 0, 0, size[0], size[1],
       box.left, box.top, box.width * k, box.height * k);
   }
 
@@ -1894,7 +2001,17 @@ export struct MeowpuutKeyboard {
   private drawPanel(ctx: CanvasRenderingContext2D, total: number): void {
     const look = this.state.keyboard;
     const w = this.kbWidth;
-    this.layoutPanel();
+    // 【优化 round 64】排版缓存：候选 token 与面板宽都未变时跳过整轮 layoutPanel
+    // （逐候选 measureText + 逐格求宽）。panelCells 是确定性的纯函数结果，
+    // 输入不变则输出逐字节相同，跳过重排像素不变；滚动只影响绘制平移。
+    if (this.panelLayoutToken !== this.lastStateToken || this.panelLayoutWidth !== w) {
+      this.layoutPanel();
+      this.panelLayoutToken = this.lastStateToken;
+      this.panelLayoutWidth = w;
+    } else {
+      // 键区可用高度（fitKeysToPanel 每帧可变）决定最大滚动，每帧照旧 clamp 一行。
+      this.panelScroll = Math.max(0, Math.min(this.panelScroll, this.panelMaxScroll()));
+    }
     const h = total;
 
     // 不透明底（没有背景模糊，按键会像鬼影透出来）。
@@ -2075,15 +2192,23 @@ export struct MeowpuutKeyboard {
       // 小写字母略上移，视觉居中（对照 Android:176）。
       const lowerLift = (key.isCharacter && key.label.length === 1 && isLowercase(key.label[0]))
         ? f.height * 0.04 : 0;
-      // 九键数字键：主标上移，角标字母组画在键底部（对照 iOS 九键样式）。
+      // 九键数字键（round 64 对齐安卓 KeysView.layoutLabels）：小号数字(≤11)在上方、
+      // 字母组(≤19)在下方，随键高缩放并整体垂直居中堆叠；超高时 fit 收缩。
+      // 此前是 iOS 风格（数字为主标居中 + 字母组缩小垫底）。
       if (key.sublabel !== null) {
-        const mainY = f.top + f.height * 0.36;
-        ctx.fillText(key.label, cx, mainY);
-        const sub = key.sublabel;
-        ctx.font = `${Math.max(9, fontSize * 0.38)}vp sans-serif`;
-        ctx.globalAlpha = 0.66;
-        ctx.fillText(sub, cx, f.top + f.height * 0.78);
-        ctx.globalAlpha = 1;
+        const gap = f.height < 36 ? 1 : 2;
+        let digitSize = Math.min(11, f.height * 0.34);
+        let groupSize = Math.min(19, f.height * 0.54);
+        const textHeight = digitSize + groupSize;
+        const fit = Math.min(1, Math.max(1, f.height - gap - 4) / textHeight);
+        digitSize *= fit;
+        groupSize *= fit;
+        const cy = f.top + f.height / 2;
+        const stackH = digitSize + gap + groupSize;
+        ctx.font = `${digitSize}vp sans-serif`;
+        ctx.fillText(key.sublabel, cx, cy - stackH / 2 + digitSize / 2);
+        ctx.font = `${groupSize}vp sans-serif`;
+        ctx.fillText(key.label, cx, cy + stackH / 2 - groupSize / 2);
       } else {
         ctx.fillText(key.label, cx, f.top + f.height / 2 - lowerLift);
       }

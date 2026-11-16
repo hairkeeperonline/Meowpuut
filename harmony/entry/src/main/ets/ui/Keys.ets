@@ -74,6 +74,13 @@ export class KeyActionToggleEnglish extends KeyAction {
   }
 }
 
+/** 【九键 round 63-6】重输：清除当前组字（对照安卓 KeyAction.ClearComposition）。 */
+export class KeyActionClearComposition extends KeyAction {
+  constructor() {
+    super('clearComposition');
+  }
+}
+
 export enum KeyStyle { CHARACTER, UTILITY, ACCENT }
 export enum KeyIcon { SHIFT, SHIFT_ON, CAPS_LOCK, DELETE, GLOBE }
 export enum ShiftState { OFF, ONCE, LOCKED }
@@ -128,11 +135,23 @@ export class KeySet {
   readonly specs: RowSpec[];
   readonly referenceColumns: number;
   readonly page: number;
-  constructor(rows: Key[][], specs: RowSpec[], referenceColumns: number, page: number = 0) {
+  /** 【round 64】键盘网格最大宽度（dp，对照安卓 maximumWidth；九键 460）。空=不限。 */
+  readonly maximumWidth: number | null;
+  constructor(rows: Key[][], specs: RowSpec[], referenceColumns: number, page: number = 0,
+    maximumWidth: number | null = null) {
     this.rows = rows;
     this.specs = specs;
     this.referenceColumns = referenceColumns;
     this.page = page;
+    this.maximumWidth = maximumWidth;
+  }
+
+  /** 布局可用宽度（对照安卓 layoutWidth）：收窄到 maximumWidth，网格整体居中。 */
+  layoutWidth(available: number): number {
+    if (this.maximumWidth !== null && this.maximumWidth > 0) {
+      return Math.min(available, this.maximumWidth);
+    }
+    return available;
   }
 }
 
@@ -148,10 +167,12 @@ export class KeyContext {
   readonly returnAccent: boolean;
   readonly returnEnabled: boolean;
   readonly expanded: boolean;
+  /** 【九键 round 63-6】当前是否有组字（对照安卓 context.composing，九键「重输」键的启用态）。 */
+  readonly composing: boolean;
 
   constructor(mode: InputMode, english: boolean, page: number, shift: ShiftState, simplified: boolean,
     needsGlobe: boolean, spaceTitle: string, returnTitle: string, returnAccent: boolean,
-    returnEnabled: boolean, expanded: boolean = false) {
+    returnEnabled: boolean, expanded: boolean = false, composing: boolean = false) {
     this.mode = mode;
     this.english = english;
     this.page = page;
@@ -163,6 +184,7 @@ export class KeyContext {
     this.returnAccent = returnAccent;
     this.returnEnabled = returnEnabled;
     this.expanded = expanded;
+    this.composing = composing;
   }
 }
 
@@ -330,59 +352,96 @@ export class KeyBuilder {
     return KeyBuilder.letters(context, t);
   }
 
-  /** 九键 3×4 布局：每键主标数字、角标字母组（标准九键，对照 iOS 九键）。 */
+  /** 九键布局（round 63-6 对齐安卓 nineKeySet 五列结构）：
+   * 行 1-3 每行 [左标点 | 三个数字键 | 右功能键]——左列 ！ | 。 | ？（长按出备选标点），
+   * 右列 删除 | 重输 | 0（对照安卓 marks/side 列；此前 round 63-4 把删除键从底行移走
+   * 却没放进侧列，九键主页一度完全无法退格——真机回归项）。
+   * referenceColumns=10 与行单位总和匹配——此前传 3 会让含弹性空格的底行以 1/3 行宽
+   * 为基准计算单位，整行溢出屏幕（用户「九键底行不对」的另一层根因）。
+   * 数字键主标数字、角标字母组（对照 iOS 九键，保留原设计决策）；「1」键上屏句号（对照 iOS）。
+   */
   private static nineKeySet(context: KeyContext, t: Words): KeySet {
     const layout: string[][] = [
       ['1', ''], ['2', 'abc'], ['3', 'def'],
       ['4', 'ghi'], ['5', 'jkl'], ['6', 'mno'],
       ['7', 'pqrs'], ['8', 'tuv'], ['9', 'wxyz'],
     ];
-    const rows: Key[][] = [];
+    const marks: Key[] = [
+      KeyBuilder.punctuationKey('！'),
+      KeyBuilder.punctuationKey('。'),
+      KeyBuilder.punctuationKey('？'),
+    ];
+    // 重输只在组字中可用（enabled=context.composing，对照安卓）；分发在
+    // MeowpuutAbility 的 'clearComposition' case（清组字+收面板，同 ESCAPE 语义）。
+    const side: Key[] = [
+      KeyBuilder.deleteKey(t),
+      new Key(new KeyActionClearComposition(), t.pick('重輸', '重输'), null, KeyStyle.UTILITY,
+        [], false, context.composing, 15, t.pick('清除目前拼音', '清除当前拼音')),
+      new Key(new KeyActionText('0'), '0', null, KeyStyle.UTILITY, [], false, true, 18, '0'),
+    ];
+    const spec = new RowSpec([1.35, 2.3, 2.3, 2.3, 1.35], RowAlignment.JUSTIFIED);
+    const keyRows: Key[][] = [];
     for (let r = 0; r < 3; r++) {
-      const row: Key[] = [];
+      const row: Key[] = [marks[r]];
       for (let c = 0; c < 3; c++) {
         const def = layout[r * 3 + c];
         if (def[0] === '1') {
-          // 「1」键：标点备选（长按出 ,?! 等；点击上屏最常用句号——对照 iOS）。
-          row.push(new Key(new KeyActionText('。'), '1', null, KeyStyle.CHARACTER,
-            ['，', '、', '？', '！', '…', '；', '：', '“', '”', '‘', '’'], true, true, 28, '标点'));
+          // 「1」键=分词（round 64 对齐安卓 segment 键：Engine(')，拼音分隔音符；
+          // 长按备选上屏「1」；角标「1」。此前是上屏句号的 iOS 风格标点键——按
+          // 用户「布局与安卓完全一致」的要求改回安卓行为。
+          const seg = new Key(new KeyActionEngine(39), t.pick('分詞', '分词'), null, KeyStyle.CHARACTER,
+            ['1'], false, true, null, t.pick('1，分詞', '1，分词'));
+          seg.sublabel = '1';
+          row.push(seg);
         } else {
-          row.push(KeyBuilder.nineKey(def, t));
+          row.push(KeyBuilder.nineKey(def));
         }
       }
-      rows.push(row);
+      row.push(side[r]);
+      keyRows.push(row);
     }
-    // 行 3: 九键底行（round 63-4 对齐安卓 nineKeyBottom）：符號 | 123 | 空格 | 中英切换 | 换行。
-    // 删除键在九键里位于行 1 右端（对照安卓 nineKeySet 的 side=[delete,重输,0]），
-    // 长按连删走既有 DeleteRepeat（420ms 后每 83ms 连删）。
+    // 行 4: 底行（round 64 完整对齐安卓 nineKeyBottom）：
+    // 符號 | 123 | (地球) | 空格 | 中英切换 | (展开时删除) | 换行。
+    // 地球键 0.9/展开删除 0.95 的条件槽位此前缺失（round 63-4 只排了固定 5 键）。
+    // 长按删除键走既有 DeleteRepeat（420ms 后每 83ms 连删）。
     // 九键数字页=9（避开通用符号页 1/2 与 emoji 分类页 3-8）。
     const symbolsKey = new Key(new KeyActionPage(1), t.pick('符號', '符号'), null, KeyStyle.UTILITY, [], false, true, 16, t.pick('符號', '符号'));
     const numberKey = new Key(new KeyActionPage(KeyBuilder.NUMERIC_PAGE), '123', null, KeyStyle.UTILITY, [], false, true, 16, t.pick('數字鍵盤', '数字键盘'));
     const spaceKey = new Key(new KeyActionSpace(), context.spaceTitle, null, KeyStyle.CHARACTER, [], false, true, 16, '空格');
     const returnKey = new Key(new KeyActionReturn(), context.returnTitle, null,
       context.returnAccent ? KeyStyle.ACCENT : KeyStyle.UTILITY, [], false, context.returnEnabled, 16, context.returnTitle);
-    const bottomKeys: Key[] = [symbolsKey, numberKey, spaceKey, KeyBuilder.toggleKey(context), returnKey];
-    const bottomSpec = new RowSpec([1.2, 1.0, 0, 1.0, 1.65], RowAlignment.JUSTIFIED);
-    const keyRows: Key[][] = [];
-    keyRows.push(rows[0]);
-    keyRows.push(rows[1]);
-    keyRows.push(rows[2]);
+    const bottomKeys: Key[] = [symbolsKey, numberKey];
+    const bottomUnits: number[] = [1.2, 1.0];
+    if (context.needsGlobe) {
+      bottomKeys.push(new Key(new KeyActionGlobe(), '', KeyIcon.GLOBE, KeyStyle.UTILITY, [], false, true, null, t.pick('選擇系統鍵盤', '选择系统键盘')));
+      bottomUnits.push(0.9);
+    }
+    bottomKeys.push(spaceKey);
+    bottomUnits.push(0);
+    bottomKeys.push(KeyBuilder.toggleKey(context));
+    bottomUnits.push(1.0);
+    if (context.expanded) {
+      bottomKeys.push(KeyBuilder.deleteKey(t));
+      bottomUnits.push(0.95);
+    }
+    bottomKeys.push(returnKey);
+    bottomUnits.push(1.65);
+    const bottomSpec = new RowSpec(bottomUnits, RowAlignment.JUSTIFIED);
     keyRows.push(bottomKeys);
-    const specs: RowSpec[] = [];
-    specs.push(new RowSpec(arrayOfFill(3, 1), RowAlignment.CENTERED));
-    specs.push(new RowSpec(arrayOfFill(3, 1), RowAlignment.CENTERED));
-    specs.push(new RowSpec(arrayOfFill(3, 1), RowAlignment.CENTERED));
-    specs.push(bottomSpec);
-    return new KeySet(keyRows, specs, 3);
+    const specs: RowSpec[] = [spec, spec, spec, bottomSpec];
+    return new KeySet(keyRows, specs, 10, 0, 460);
   }
 
   /** 九键数字页（round 63-4，对照安卓 nineKeyNumbers）：3×4 数字 + 标点环绕。 */
   private static nineKeyNumbers(context: KeyContext, t: Words): KeySet {
     const rows: Key[][] = [];
-    // 行 1-3: [左功能/标点 | 三个数字 | 右标点]（左列从上到下：符號 | + | -；右列：删除 | / | #）。
+    // 行 1-3: [左功能/标点 | 三个数字 | 右标点]（左列从上到下：符號 | 地球(否则+) | -；右列：删除 | / | #）。
+    // round 64：左列中格按安卓 nineKeyNumbers 在 needsGlobe 时放地球键。
     const leftCol: Key[] = [
       new Key(new KeyActionPage(1), t.pick('符號', '符号'), null, KeyStyle.UTILITY, [], false, true, 16, t.pick('符號', '符号')),
-      KeyBuilder.punctuationKey('+'),
+      context.needsGlobe
+        ? new Key(new KeyActionGlobe(), '', KeyIcon.GLOBE, KeyStyle.UTILITY, [], false, true, null, t.pick('選擇系統鍵盤', '选择系统键盘'))
+        : KeyBuilder.punctuationKey('+'),
       KeyBuilder.punctuationKey('-'),
     ];
     const rightCol: Key[] = [
@@ -412,16 +471,18 @@ export class KeyBuilder {
     rows.push(bottomKeys);
     const spec = new RowSpec([1.35, 2.3, 2.3, 2.3, 1.35], RowAlignment.JUSTIFIED);
     const specs: RowSpec[] = [spec, spec, spec, spec];
-    return new KeySet(rows, specs, 3);
+    // referenceColumns=10 与行单位总和 9.6 匹配（round 63-6：此前传 3，行被自动缩到
+    // 29% 意图宽度，侧列过窄；现在按真实基准排布，对照安卓 referenceColumns=10）。
+    return new KeySet(rows, specs, 10, KeyBuilder.NUMERIC_PAGE, 460);
   }
 
-  /** 造一个九键数字键：主标数字，角标字母（副文本）。 */
-  private static nineKey(def: string[], t: Words): Key {
+  /** 造一个九键数字键（round 64 对齐安卓）：主标字母组、角标数字、长按备选上屏数字。 */
+  private static nineKey(def: string[]): Key {
     const digit = def[0];
     const letters = def[1];
-    const key = new Key(new KeyActionEngine(digit.charCodeAt(0)), digit, null,
-      KeyStyle.CHARACTER, [], false, true, 28, `拼音九键 ${digit}`);
-    key.sublabel = letters;
+    const key = new Key(new KeyActionEngine(digit.charCodeAt(0)), letters, null,
+      KeyStyle.CHARACTER, [digit], false, true, null, `${digit} ${letters}`);
+    key.sublabel = digit;
     return key;
   }
 
@@ -432,7 +493,7 @@ export class KeyBuilder {
     units.push(1.25);
     if (second !== null) { keys.push(second); units.push(1.25); }
     if (context.needsGlobe) {
-      keys.push(new Key(new KeyActionGlobe(), '', KeyIcon.GLOBE, KeyStyle.UTILITY, [], false, true, null, t.pick('切換鍵盤', '切换键盘')));
+      keys.push(new Key(new KeyActionGlobe(), '', KeyIcon.GLOBE, KeyStyle.UTILITY, [], false, true, null, t.pick('選擇系統鍵盤', '选择系统键盘')));
       units.push(1.25);
     }
     keys.push(new Key(new KeyActionSpace(), context.spaceTitle, null, KeyStyle.CHARACTER, [], false, true, 16, '空格'));
@@ -446,18 +507,23 @@ export class KeyBuilder {
 
   private static toggleKey(context: KeyContext): Key {
     let label: string;
+    // 九键对齐安卓（round 63-6）：中文态显示「英」、英文态显示「中」（Keys.kt toggleKey）。
     if (context.english) {
       switch (context.mode) {
+        case InputMode.PINYIN9: label = '中'; break;
         case InputMode.PINYIN: label = '拼'; break;
         case InputMode.ZHUYIN: label = 'ㄅ'; break;
         case InputMode.JAPANESE: label = 'あ'; break;
         default: label = '拼';
       }
+    } else if (context.mode === InputMode.PINYIN9) {
+      label = '英';
     } else {
       label = 'ABC';
     }
     let spoken = '英文';
-    if (!context.english && context.mode === InputMode.JAPANESE) spoken = '日文';
+    if (context.mode === InputMode.PINYIN9) spoken = context.english ? '回到九键拼音' : '切换到英文';
+    else if (!context.english && context.mode === InputMode.JAPANESE) spoken = '日文';
     else if (context.english) spoken = '中文';
     return new Key(new KeyActionToggleEnglish(), label, null, KeyStyle.UTILITY, [], false, true, 16, spoken);
   }
@@ -568,7 +634,14 @@ export class KeyBuilder {
     return new KeySet(keyRows, specs, 11);
   }
 
-  static symbolRows(page: number, chinese: boolean): string[][] {
+  /** 符号页内容（round 64 对齐安卓 symbolRows 四分支：日文/西文/简体/繁体）。 */
+  static symbolRows(page: number, chinese: boolean, simplified: boolean, japanese: boolean): string[][] {
+    if (japanese && page === 1) {
+      return [stringToCharArray('1234567890'), ['ー', '/', '：', '；', '（', '）', '¥', '@', '「', '」'], ['。', '、', '？', '！', '・', '.']];
+    }
+    if (japanese) {
+      return [['【', '】', '｛', '｝', '#', '%', '^', '*', '+', '='], ['_', '—', '＼', '｜', '～', '『', '』', '€', '&', '♪'], ['…', '、', '。', '？', '！', "'"]];
+    }
     if (page === 1 && !chinese) {
       return [stringToCharArray('1234567890'), ['-', '/', ':', ';', '(', ')', '$', '&', '@', '"'], ['.', ',', '?', '!', "'"]];
     }
@@ -576,7 +649,10 @@ export class KeyBuilder {
       return [['[', ']', '{', '}', '#', '%', '^', '*', '+', '='], ['_', '\\', '|', '~', '<', '>', '€', '£', '¥', '•'], ['.', ',', '?', '!', "'"]];
     }
     if (page === 1) {
-      return [stringToCharArray('1234567890'), ['-', '/', '：', '；', '（', '）', '¥', '@', '\u201C', '\u201D'], ['。', '，', '、', '？', '！', '.']];
+      // 简体：¥ + “”；繁体（对照安卓）：$ + 「」——此前固定用简体分支。
+      return [stringToCharArray('1234567890'),
+        simplified ? ['-', '/', '：', '；', '（', '）', '¥', '@', '\u201C', '\u201D'] : ['-', '/', '：', '；', '（', '）', '$', '@', '「', '」'],
+        ['。', '，', '、', '？', '！', '.']];
     }
     return [['【', '】', '｛', '｝', '#', '%', '^', '*', '+', '='], ['_', '—', '＼', '｜', '～', '《', '》', '€', '&', '·'], ['…', '，', '^_^', '？', '！', "'"]];
   }
@@ -608,7 +684,9 @@ export class KeyBuilder {
 
   private static symbols(context: KeyContext, page: number, chinese: boolean, t: Words): KeySet {
     const emoji = page >= 3;
-    const source = emoji ? KeyBuilder.emojiRows(page) : KeyBuilder.symbolRows(page, chinese);
+    // round 64：日文符号分支与简繁分支对齐安卓 symbolRows(page, chinese, simplified, japanese)。
+    const japanese = !context.english && context.mode === InputMode.JAPANESE;
+    const source = emoji ? KeyBuilder.emojiRows(page) : KeyBuilder.symbolRows(page, chinese, context.simplified, japanese);
     const keyOf = (text: string): Key => {
       const altArr = SYMBOL_ALTERNATES.get(text);
       const alts: string[] = [];
@@ -620,7 +698,11 @@ export class KeyBuilder {
       return new Key(new KeyActionText(text), text, null, KeyStyle.CHARACTER,
         alts, true, true, text.length > 1 ? 16 : 21, text);
     };
-    // 切换键：数字页「#+=」进第 2 页；第 2 页「☺」进 emoji 分类；emoji 页循环下一分类（回 3）。
+    // 切换键（round 64 对齐安卓 symbols()）：数字页「#+=」进第 2 页；
+    // 第 2 页「123」回第 1 页（九键模式进九键数字页，对照安卓 nine ? NUMERIC_PAGE : 1）。
+    // ☺ 表情键移到底行第二位（对照安卓 emoji 键位置）；emoji 页由 ☺ 进入、行首键循环分类
+    // （鸿蒙增强：安卓 0.9.1 无 emoji 键页，其表情在展开面板——保留我们的键页实现但入口位置对齐）。
+    const nine = context.mode === InputMode.PINYIN9 && !context.english;
     let other: Key;
     if (emoji) {
       const next = page >= 6 ? 3 : page + 1;
@@ -629,15 +711,20 @@ export class KeyBuilder {
     } else if (page === 1) {
       other = new Key(new KeyActionPage(2), '#+=', null, KeyStyle.UTILITY, [], false, true, 16, t.pick('更多符號', '更多符号'));
     } else {
-      other = new Key(new KeyActionPage(3), '☺', null, KeyStyle.UTILITY, [], false, true, 16, '表情');
+      other = new Key(new KeyActionPage(nine ? KeyBuilder.NUMERIC_PAGE : 1), '123', null, KeyStyle.UTILITY, [], false, true, 16, t.pick('數字', '数字'));
     }
     let lettersLabel: string;
     if (context.english) lettersLabel = 'ABC';
     else if (context.mode === InputMode.ZHUYIN) lettersLabel = '注音';
     else if (context.mode === InputMode.JAPANESE) lettersLabel = 'かな';
+    else if (context.mode === InputMode.PINYIN9) lettersLabel = t.pick('九鍵', '九键');
     else lettersLabel = '拼音';
     const back = new Key(new KeyActionPage(0), lettersLabel, null, KeyStyle.UTILITY, [], false, true, 16, '字母');
-    const bottom = KeyBuilder.bottomRow(context, t, back, null);
+    // ☺：符号页进 emoji 分类（page 3）；emoji 页循环下一分类（打开时高亮，对照安卓 ACCENT）。
+    const emojiNext = emoji ? (page >= 6 ? 3 : page + 1) : 3;
+    const emojiKey = new Key(new KeyActionPage(emojiNext), '☺', null,
+      emoji ? KeyStyle.ACCENT : KeyStyle.UTILITY, [], false, true, 17, t.pick('表情符號', '表情符号'));
+    const bottom = KeyBuilder.bottomRow(context, t, back, emojiKey);
     const middle = (10 - 2 * 1.32) / source[2].length;
 
     // Build row 3: [other, ...source[2].map(keyOf), deleteKey]

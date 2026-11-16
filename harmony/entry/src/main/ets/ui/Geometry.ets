@@ -263,8 +263,13 @@ export class KeyPlacement {
   }
 }
 
-export function layoutKeyGrid(rows: RowSpec[], width: number, referenceColumns: number, metrics: KeyMetrics): KeyPlacement[][] {
-  const usable = Math.max(1, width - 2 * metrics.sideMargin);
+export function layoutKeyGrid(rows: RowSpec[], width: number, referenceColumns: number, metrics: KeyMetrics,
+  maximumWidth: number = 0): KeyPlacement[][] {
+  // 【round 64】maximumWidth（对照安卓 KeySet.layoutWidth + KeyboardView.onLayout）：
+  // 可用宽度收窄到上限后，整个键区网格水平居中（keyLeft=(width-layoutWidth)/2）。
+  const layoutWidth = maximumWidth > 0 ? Math.min(width, maximumWidth) : width;
+  const shift = (width - layoutWidth) / 2;
+  const usable = Math.max(1, layoutWidth - 2 * metrics.sideMargin);
   const unit = Math.max(1, (usable - (referenceColumns - 1) * metrics.keyGap) / referenceColumns);
   const totalHeight = keyMetricsAreaHeight(metrics, rows.length);
   const span = (units: number) => units * unit + Math.max(0, units - 1) * metrics.keyGap;
@@ -279,7 +284,7 @@ export function layoutKeyGrid(rows: RowSpec[], width: number, referenceColumns: 
     switch (spec.alignment) {
       case RowAlignment.CENTERED: {
         const widths = spec.units.map(span);
-        let x = metrics.sideMargin + Math.max(0, (usable - widths.reduce((a, b) => a + b, 0) - gaps) / 2);
+        let x = shift + metrics.sideMargin + Math.max(0, (usable - widths.reduce((a, b) => a + b, 0) - gaps) / 2);
         for (let i = 0; i < widths.length; i++) {
           const w = widths[i];
           frames.push(new Box(x, y, w, metrics.keyHeight));
@@ -298,7 +303,7 @@ export function layoutKeyGrid(rows: RowSpec[], width: number, referenceColumns: 
           const factor = fixed > 0 ? Math.max(0.5, (usable - gaps) / fixed) : 1;
           widths = spec.units.map(u => span(u) * factor);
         }
-        let x = metrics.sideMargin + Math.max(0, (usable - widths.reduce((a, b) => a + b, 0) - gaps) / 2);
+        let x = shift + metrics.sideMargin + Math.max(0, (usable - widths.reduce((a, b) => a + b, 0) - gaps) / 2);
         for (let i = 0; i < widths.length; i++) {
           const w = widths[i];
           frames.push(new Box(x, y, w, metrics.keyHeight));
@@ -310,16 +315,16 @@ export function layoutKeyGrid(rows: RowSpec[], width: number, referenceColumns: 
         const widths = spec.units.map(span);
         const first = widths[0];
         const last = widths[widths.length - 1];
-        frames.push(new Box(metrics.sideMargin, y, first, metrics.keyHeight));
+        frames.push(new Box(shift + metrics.sideMargin, y, first, metrics.keyHeight));
         const middle = widths.slice(1, Math.max(1, widths.length - 1));
         const middleWidth = middle.reduce((a, b) => a + b, 0) + Math.max(0, middle.length - 1) * metrics.keyGap;
-        let x = metrics.sideMargin + (usable - middleWidth) / 2;
+        let x = shift + metrics.sideMargin + (usable - middleWidth) / 2;
         for (let i = 0; i < middle.length; i++) {
           const w = middle[i];
           frames.push(new Box(x, y, w, metrics.keyHeight));
           x += w + metrics.keyGap;
         }
-        if (widths.length > 1) frames.push(new Box(metrics.sideMargin + usable - last, y, last, metrics.keyHeight));
+        if (widths.length > 1) frames.push(new Box(shift + metrics.sideMargin + usable - last, y, last, metrics.keyHeight));
         break;
       }
     }

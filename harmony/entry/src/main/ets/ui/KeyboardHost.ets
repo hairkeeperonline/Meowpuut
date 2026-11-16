@@ -80,12 +80,12 @@ export class KeyboardHost {
   private state: KeyboardState | null = null;
   private refreshToken: number = 0;
   private resetFlag: boolean = false;
-  private committedToken: number = 0;
-  private petToken: number = 0;
+  private _committedToken: number = 0;
+  private _petToken: number = 0;
   private petCat: string = '';
   private petToast: string = '';
   private petHearts: number = -1;
-  private announceToken: number = 0;
+  private _announceToken: number = 0;
   private announceText: string = '';
 
   /** ability 侧调用，把最新状态推给页面。 */
@@ -97,7 +97,7 @@ export class KeyboardHost {
 
   /** 组字提交后，米米莫低头摇头。 */
   commit(): void {
-    this.committedToken++;
+    this._committedToken++;
   }
 
   /** 摸猫：cat 为猫名字，toast 为提示文案（可能为空串），hearts 为进度爱心数（-1 无）。 */
@@ -105,12 +105,12 @@ export class KeyboardHost {
     this.petCat = cat;
     this.petToast = toast;
     this.petHearts = hearts;
-    this.petToken++;
+    this._petToken++;
   }
 
   announce(text: string): void {
     this.announceText = text;
-    this.announceToken++;
+    this._announceToken++;
   }
 
   /** 页面侧读取。 */
@@ -123,4 +123,11 @@ export class KeyboardHost {
     return new PetSnapshot(this.petCat, this.petToast, this.petHearts, this.petToken);
   }
   takeAnnounce(): AnnounceSnapshot { return new AnnounceSnapshot(this.announceText, this.announceToken); }
+
+  /** 【性能 round 64】轮询侧只读 token 直读：先比 token，无变化就不 take*，免去快照分配。
+   *  注：getter 不能与私有字段同名（duplicate identifier），故 token 计数字段改用 _ 前缀（同 KeyTouches._cursorMode 约定）。 */
+  get stateToken(): number { return this.refreshToken; }
+  get committedToken(): number { return this._committedToken; }
+  get petToken(): number { return this._petToken; }
+  get announceToken(): number { return this._announceToken; }
 }
