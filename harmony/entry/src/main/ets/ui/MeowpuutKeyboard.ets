@@ -893,6 +893,14 @@ export struct MeowpuutKeyboard {
         })
     }
     .width('100%')
+    // 【round 64 真机修复·悬浮底行截断】根布局必须显式占满父容器「扣除把手后」的
+    // 剩余高度：悬浮态 KeyboardPage 的 Column = 把手(32vp) + 本组件，若不约束本组件
+    // 高度，内部 layoutWeight(1) 的键区画布会吃到父容器传入的完整约束（含把手的
+    // 349vp），比实际可用多 32vp——键区画布溢出面板窗口，底行被窗口底缘裁掉约一半
+    // （真机实测：底行画在 [203,257]vp、窗口 229vp 处截断，空格键面仅剩 81px）。
+    // 贴底态无把手、约束恰好等于面板高，故历史版贴底正常、悬浮截断。
+    // layoutWeight(1) 使根 Column = 父高-把手，键区画布随之回到自洽数值。
+    .layoutWeight(1)
     // 无障碍基础落地：整块键盘对屏幕阅读器可识别。逐键虚拟节点
     // （对应 Android VirtualAccessibility）需叠加透明语义层 + 真机 TalkBack
     // 验证，见 PARITY.md。

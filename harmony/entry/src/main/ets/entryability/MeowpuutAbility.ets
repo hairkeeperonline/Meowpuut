@@ -435,6 +435,11 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
   /** 悬浮面板当前位置（拖动累计用）。 */
   private floatX: number = 0;
   private floatY: number = 0;
+  /** 【round 64 真机修复】悬浮拖动的最新目标位置（moveTo 合并用）。 */
+  private moveTargetX: number = 0;
+  private moveTargetY: number = 0;
+  /** moveTo 是否在途（合并拖动帧，防止异步 IPC 排队积压）。 */
+  private movePending: boolean = false;
 
   /** 悬浮拖动把手高度（vp）。 */
   private static readonly DRAG_HANDLE_VP = 32;
@@ -447,6 +452,36 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     const disp: display.Display = display.getDefaultDisplaySync();
     const density = disp.densityDPI / 160;
     return this.lastPanelHeight + Math.round(MeowpuutAbility.DRAG_HANDLE_VP * density);
+  }
+
+  /** 【round 64 真机修复】悬浮面板移动合并：moveTo 是异步 IPC（跨进程窗口管理），
+   *  拖动时每帧（~16ms）各发一次会排队积压——面板越掉越远、松手后才慢慢追上，
+   *  真机反馈「完全不跟手」。改为：只在上一帧的 moveTo 完成后才发起下一次，
+   *  且始终指向最新目标（中间位置直接丢弃）。最大滞后 = 单次 IPC 时延。
+   *  applyPanelPosition 的初始定位不经过此路径（保持顺序语义）。 */
+  private movePanelCoalesced(x: number, y: number): void {
+    if (this.panel === null) return;
+    this.moveTargetX = x;
+    this.moveTargetY = y;
+    if (this.movePending) return;
+    this.movePending = true;
+    const step = (): void => {
+      const panel = this.panel;
+      if (panel === null) { this.movePending = false; return; }
+      const px = this.moveTargetX;
+      const py = this.moveTargetY;
+      panel.moveTo(px, py).then(() => {
+        // 目标又前进：继续追最新位置；没变：挂起等待下一帧。
+        if (this.moveTargetX !== px || this.moveTargetY !== py) {
+          step();
+        } else {
+          this.movePending = false;
+        }
+      }).catch(() => {
+        this.movePending = false;
+      });
+    };
+    step();
   }
 
   /** 【悬浮键盘】拖动把手：增量移动面板（按面板真实宽高钳制，右/下缘不越屏）。 */
@@ -465,7 +500,8 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     const nx = Math.max(0, Math.min(disp.width - panelW, this.floatX + dx));
     this.floatX = nx;
     this.floatY = ny;
-    this.panel.moveTo(nx, ny).catch(() => {});
+    // 拖动路径走合并移动（见 movePanelCoalesced——不跟手的根因修复）。
+    this.movePanelCoalesced(nx, ny);
   }
 
   /**
