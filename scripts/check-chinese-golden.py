@@ -6,7 +6,7 @@
   python3 scripts/check-chinese-golden.py --make-inputs [--parity DIR]
                                                           rewrite the input lists (rarely needed)
 
-Options: --resources DIR  compiled lexicon directory (default .build/Meowpuut.app/Contents/Resources)
+Options: --resources DIR  compiled lexicon directory (default .build/lexicon)
          --lib PATH       libmeowpuut_ffi to load; without it the library is built with cargo
          --golden DIR     where inputs and goldens live (default Tests/golden)
 
@@ -222,7 +222,7 @@ def main():
     parser.add_argument("--write", action="store_true")
     parser.add_argument("--make-inputs", action="store_true")
     parser.add_argument("--parity")
-    parser.add_argument("--resources", default=str(ROOT / ".build/Meowpuut.app/Contents/Resources"))
+    parser.add_argument("--resources", default=str(ROOT / ".build/lexicon"))
     parser.add_argument("--lib")
     parser.add_argument("--golden", default=str(ROOT / "Tests/golden"))
     arguments = parser.parse_args()

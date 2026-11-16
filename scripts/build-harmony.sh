@@ -85,9 +85,9 @@ build_rust() {
 }
 
 # 键盘要读的词典：中文词库、词对表、日文词表（和 Android 同一份）。
-LEXICON_FILES="mimo_base.bin mimo_pairs.bin native-japanese.tsv"
+LEXICON_FILES="mimo_base.bin mimo_pairs.bin mimo_en.bin native-japanese.tsv"
 # compile-native-lexicon.py 会读的东西，用于判断是否需要重新编译。
-LEXICON_SOURCES="DataSources Resources/Lexicon scripts/compile-native-lexicon.py scripts/mimo_pipeline.py scripts/mimo_binary.py scripts/mimo_pairs.py scripts/mimo_jp_compile.py scripts/mimo_jp_binary.py scripts/japanese_readings.py scripts/ConvertScript.swift"
+LEXICON_SOURCES="DataSources Resources/Lexicon scripts/compile-native-lexicon.py scripts/mimo_pipeline.py scripts/mimo_binary.py scripts/mimo_pairs.py scripts/mimo_jp_compile.py scripts/mimo_jp_binary.py scripts/mimo_english.py scripts/mimo_en_binary.py scripts/japanese_readings.py scripts/ConvertScript.swift"
 
 lexicon_current() {
   local file
@@ -116,6 +116,8 @@ stage_assets() {
     if ! lexicon_current "$src"; then
       mkdir -p ".build/harmony-lexicon"
       python_for_build scripts/compile-native-lexicon.py ".build/harmony-lexicon" "$(converter_path)"
+      # 英文词库（新内核 MIMO-EN-1 格式，mimo_en_binary.py 独立生成）。
+      python_for_build scripts/mimo_en_binary.py ".build/harmony-lexicon/mimo_en.bin"
       src=".build/harmony-lexicon"
     fi
     stage_asset_dir "$src" "$assets_dir"
@@ -146,11 +148,11 @@ python_for_build() {
 # 独立可执行文件，就传一个带引号的命令行 "python.exe" "convert-script.py"
 # （compile-native-lexicon.py 的 converter_argv 会拆分它）。
 converter_path() {
+  # 新版 compile-native-lexicon.py 把 converter 当单个可执行文件
+  # （subprocess.run([converter])）。macOS/Linux 用 swiftc 编出的二进制；
+  # Windows 生成 .bat 包装器调 scripts/convert-script.py（OpenCC 版），
+  # 并回显纯反斜杠 Windows 路径（cmd/ CreateProcess 才认）。
   local built="$ROOT/.build/convert-script"
-  if [ -x "$built" ] && [ ! -d "$built" ]; then
-    echo "$built"
-    return
-  fi
   if command -v swiftc >/dev/null && [ -f scripts/ConvertScript.swift ]; then
     swiftc scripts/ConvertScript.swift -o "$built" >/dev/null 2>&1 && { echo "$built"; return; }
   fi
@@ -160,13 +162,24 @@ converter_path() {
     echo "error: 需要一个 Python 解释器来编译词库（设置 MEOWPUUT_PYTHON）" >&2
     exit 1
   fi
+  local bat="$ROOT/.build/convert-script.bat"
+  mkdir -p "$ROOT/.build"
   if command -v cygpath >/dev/null; then
-    printf '"%s" "%s"' "$(cygpath -w "$py")" "$(cygpath -w "$ROOT/scripts/convert-script.py")"
-    return
+    local pyw batw scriptw
+    pyw="$(cygpath -w "$py")"
+    batw="$(cygpath -w "$bat")"
+    scriptw="$(cygpath -w "$ROOT/scripts/convert-script.py")"
+    printf '@echo off
+"%s" "%s" %%*
+' "$pyw" "$scriptw" > "$bat"
+    echo "$batw"
+  else
+    printf '#!/bin/sh
+exec "%s" "%s" "$@"
+' "$py" "$ROOT/scripts/convert-script.py" > "$bat"
+    chmod +x "$bat"
+    echo "$bat"
   fi
-  printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$py" "$ROOT/scripts/convert-script.py" > "$built"
-  chmod +x "$built"
-  echo "$built"
 }
 
 # 猫咪与节日贴图（Resources/ 下的原图，保留版权，原样复制到 rawfile）。

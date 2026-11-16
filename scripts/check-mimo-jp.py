@@ -4,7 +4,7 @@
 usage: check-mimo-jp.py [DIR] [--allow-hold] [--source-only] [--probe] [--lib PATH]
 
 DIR is a compiled directory holding mimo_jp.bin, mimo_base.bin, native-pinyin.tsv and
-native-japanese.json (default: .build/Meowpuut.app/Contents/Resources).
+native-japanese.json (default: .build/lexicon).
 --source-only  checks that need no compiled output: SOURCE.json hashes, deny file, kanji table,
                the Python romaji port.
 --allow-hold   accept `hold` rows in Resources/Lexicon/japanese-deny.tsv.
@@ -225,8 +225,8 @@ def image_checks(directory, deny, lib_path, probe):
     rows = []
     for line in native.decode().splitlines()[1:]:
         fields = line.split("\t")
-        if len(fields) != 5:
-            break
+        if len(fields) not in (5, 6):
+            break  # `# context` starts the context rows; a sixth field is a row mark (w, n, k of compile-native-lexicon.py)
         if fields[0][:1].isupper():
             continue  # English words (upper-case keys, crates/meowpuut-core/src/latin.rs) are no Chinese reading
         rows.append(((fields[0], fields[1], fields[2], fields[3]), int(fields[4])))
@@ -329,7 +329,7 @@ def main(argv):
     if any(arg.startswith("-") for arg in rest):
         print(__doc__.strip())
         return 2
-    directory = Path(rest[0]) if rest else ROOT / ".build/Meowpuut.app/Contents/Resources"
+    directory = Path(rest[0]) if rest else ROOT / ".build/lexicon"
     deny, _ = source_checks("--allow-hold" in flags)
     if "--source-only" not in flags:
         image_checks(directory, deny, lib_path, "--probe" in flags)

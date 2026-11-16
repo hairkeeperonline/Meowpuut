@@ -34,8 +34,8 @@ fn candidates(session: &mut Session, keys: &str, simplified: bool) -> Vec<String
 #[test]
 fn shipped_base_in_place_equals_copy() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let file = fs::read(root.join("iOS/Generated/mimo_base.bin"))
-        .expect("iOS/Generated/mimo_base.bin missing; run scripts/prepare-ios.sh");
+    let file = fs::read(root.join(".build/lexicon/mimo_base.bin"))
+        .expect(".build/lexicon/mimo_base.bin missing; run scripts/build-lexicon.sh");
     let image = |off: usize, len: usize| &file[read_u32(&file, off)..read_u32(&file, off) + read_u32(&file, len)];
     let (py, zy) = (image(16, 20), image(24, 28));
     let v2 = Lexicon::pack_base(py, zy);
@@ -46,8 +46,8 @@ fn shipped_base_in_place_equals_copy() {
     let v2: &'static [u8] = Box::leak(v2.into_boxed_slice());
 
     let inputs = [
-        (true, "nihao"), (true, "zhongguoren"), (true, "woxiangqu"), (true, "shi"), (true, "zhonghuarenmingongheguo"),
-        (true, "xian"), (true, "nhao"), (true, "zg"), (true, "jintiantianqihenhao"), (true, "lvse"),
+        (true, "nihao"), (true, "xuexiaoshitang"), (true, "woxiangqu"), (true, "shi"), (true, "woxiangquyigefujindekafeiguan"),
+        (true, "xian"), (true, "nhao"), (true, "py"), (true, "jintiantianqihenhao"), (true, "lvse"),
         (false, "su3cl3"), (false, "5j/ cj86"), (false, "ji3"), (false, "1j4ji3"), (false, "z/6"),
     ];
     for pinyin in [true, false] {

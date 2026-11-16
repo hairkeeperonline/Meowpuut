@@ -7,11 +7,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use meowpuut_core::pairs::{Pairs, END, START};
-use meowpuut_core::{Lexicon, Session};
+use meowpuut_core::{CandidateKind, CandidateScoreKind, Lexicon, Session};
 
 fn generated(name: &str) -> &'static [u8] {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../iOS/Generated").join(name);
-    let bytes = fs::read(&path).unwrap_or_else(|_| panic!("{} missing; run scripts/prepare-ios.sh", path.display()));
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.build/lexicon").join(name);
+    let bytes = fs::read(&path).unwrap_or_else(|_| panic!("{} missing; run scripts/build-lexicon.sh", path.display()));
     Box::leak(bytes.into_boxed_slice())
 }
 
@@ -85,5 +85,194 @@ fn shipped_pairs_first_candidates() {
             }
             assert_eq!(session.candidate(0), expected, "{keys}, simplified {simplified}");
         }
+    }
+}
+
+#[test]
+fn shipped_pinyin_corrections_keep_tones_and_original_byte_offsets() {
+    let mut lex = Lexicon::from_base_in_place(generated("mimo_base.bin"), true, None).unwrap();
+    let table = Pairs::in_place(generated("mimo_pairs.bin"), &lex.index().word_ids, None).unwrap();
+    lex.set_pairs(table);
+    let mut session = Session::new(Arc::new(lex));
+    let cases = [
+        ("fanfa", "方法", "方法"), ("fangqie", "番茄", "番茄"),
+        ("penyou", "朋友", "朋友"), ("zhengde", "真的", "真的"),
+        ("jingzhang", "緊張", "紧张"), ("qinchu", "清楚", "清楚"),
+        ("dian'yin", "電影", "电影"), ("qin1chu3", "清楚", "清楚"),
+        ("jingtianwoqukandianying", "今天我去看電影", "今天我去看电影"),
+        ("mingtianyaogenpenyoujianmian", "明天要跟朋友見面", "明天要跟朋友见面"),
+        ("woxihuanfangdian", "我喜歡飯店", "我喜欢饭店"),
+        ("wodexingwen", "我的新聞", "我的新闻"),
+        ("gognzuo", "工作", "工作"), ("gonggzuo", "工作", "工作"),
+        ("gogzuo", "工作", "工作"), ("xuexaio", "學校", "学校"),
+        ("xihun", "喜歡", "喜欢"),
+    ];
+    for (keys, hant, hans) in cases {
+        for (simplified, expected) in [(false, hant), (true, hans)] {
+            session.clear();
+            session.set_simplified(simplified);
+            for k in keys.bytes() { assert!(session.key(i32::from(k))); }
+            let index = (0..session.candidate_count().min(5)).find(|&i| session.candidate(i) == expected)
+                .unwrap_or_else(|| panic!("missing {expected} from first five for {keys}, simplified {simplified}"));
+            let info = session.candidate_info(index).unwrap();
+            assert_eq!(info.kind, CandidateKind::Correction as u32);
+            assert_eq!(info.consumed_bytes, keys.len() as u64);
+            assert_eq!(info.remaining_offset_bytes, keys.len() as u64);
+            if keys == "qinchu" {
+                assert_ne!(index, 0);
+                assert_eq!(session.candidate_info(0).unwrap().kind, CandidateKind::Exact as u32);
+            }
+            assert!(session.choose(index));
+            assert_eq!(session.committed(), expected);
+            assert!(session.input().is_empty());
+        }
+    }
+    for k in "qin3chu3".bytes() { assert!(session.key(i32::from(k))); }
+    assert!((0..session.candidate_count()).all(|i| session.candidate(i) != "清楚"));
+}
+
+#[test]
+fn initial_confusions_offer_a_common_phrase_without_displacing_the_typed_leader() {
+    let mut lex = Lexicon::from_base_in_place(generated("mimo_base.bin"), true, None).unwrap();
+    let table = Pairs::in_place(generated("mimo_pairs.bin"), &lex.index().word_ids, None).unwrap();
+    lex.set_pairs(table);
+    let mut session = Session::new(Arc::new(lex));
+    let cases = [
+        ("sijian", "時間", "时间"),
+        ("cu'xian4", "出現", "出现"),
+        ("lannv", "男女", "男女"),
+        ("lengliang", "能量", "能量"),
+        ("zhaoshanghao", "早上好", "早上好"),
+        ("woxiangzidao", "我想知道", "我想知道"),
+        ("womeiyousijian", "我沒有時間", "我没有时间"),
+    ];
+    for (keys, hant, hans) in cases {
+        for (simplified, expected) in [(false, hant), (true, hans)] {
+            session.clear();
+            session.set_simplified(simplified);
+            for key in keys.bytes() { assert!(session.key(i32::from(key))); }
+            let index = (0..session.candidate_count().min(3)).find(|&i| session.candidate(i) == expected)
+                .unwrap_or_else(|| panic!("{keys}: missing {expected} in the first three candidates"));
+            let info = session.candidate_info(index).unwrap();
+            assert_eq!(info.kind, CandidateKind::Correction as u32);
+            assert_eq!(info.score_kind, CandidateScoreKind::FuzzyInitial as u32);
+            assert_eq!(info.remaining_offset_bytes, keys.len() as u64);
+            assert!(session.choose(index));
+            assert_eq!(session.committed(), expected);
+            assert!(session.input().is_empty());
+        }
+    }
+
+    for (keys, leader) in [("shijian", "时间"), ("gongzuo", "工作"), ("pengyou", "朋友")] {
+        session.clear();
+        for key in keys.bytes() { assert!(session.key(i32::from(key))); }
+        assert_eq!(session.candidate(0), leader);
+    }
+}
+
+#[test]
+fn nasal_correction_does_not_drop_a_following_syllables_initial() {
+    let lex = Lexicon::load(concat!(
+        "MEOWPUUT-PINYIN-1\n",
+        "guo\tguo4\t過\t过\t4800\n",
+        "ji\tji1\t基\t基\t4800\n",
+        "jin\tjin1\t金\t金\t4800\n",
+        "jing\tjing1\t經\t经\t4800\n",
+        "jingguo\tjing1guo4\t經過\t经过\t5500\n",
+        "jinguo\tjin1guo4\t金過\t金过\t4900\n",
+        "jinuo\tji1nuo4\t基諾\t基诺\t5400\n",
+        "nuo\tnuo4\t諾\t诺\t4800\n",
+    )).unwrap();
+    let mut session = Session::new(Arc::new(lex));
+    for k in "jinguo".bytes() { assert!(session.key(i32::from(k))); }
+    assert_eq!(session.candidate(0), "金過");
+    assert!((0..session.candidate_count()).any(|i| session.candidate(i) == "經過"));
+    assert!((0..session.candidate_count()).all(|i| session.candidate(i) != "基諾"));
+}
+
+#[test]
+fn dropped_letter_guess_keeps_a_complete_reading_ahead() {
+    let lex = Lexicon::load(concat!(
+        "MEOWPUUT-PINYIN-1\n",
+        "ciku\tci2ku4\t詞庫\t词库\t5500\n",
+        "hkn\th1k3n2\t還可能\t还可能\t5000\n",
+        "hong\thong2\t紅\t红\t4800\n",
+        "po\tpo4\t破\t破\t4800\n",
+        "san\tsan1\t三\t三\t4800\n",
+        "shanpo\tshan1po1\t山坡\t山坡\t5500\n",
+    )).unwrap();
+    let mut session = Session::new(Arc::new(lex));
+    for key in b"sanpo" { assert!(session.key(i32::from(*key))); }
+    assert_eq!(session.candidate(0), "三破");
+    assert!((1..session.candidate_count()).any(|i| session.candidate(i) == "山坡"));
+
+    for (input, unrelated) in [(b"hon", "還可能"), (b"iku", "詞庫")] {
+        session.clear();
+        for key in input { assert!(session.key(i32::from(*key))); }
+        assert!((0..session.candidate_count()).all(|i| session.candidate(i) != unrelated));
+    }
+}
+
+#[test]
+fn unverified_complete_paths_stay_ahead_of_nasal_guesses() {
+    let lex = Lexicon::from_base_in_place(generated("mimo_base.bin"), true, None).unwrap();
+    let mut session = Session::new(Arc::new(lex));
+    let cases = [
+        ("mafangeiwocaidan", "麻煩給我菜單", "麻烦给我菜单"),
+        ("niranguotoufa", "你染過頭髮", "你染过头发"),
+    ];
+    for (keys, hant, hans) in cases {
+        for (simplified, expected) in [(false, hant), (true, hans)] {
+            session.clear();
+            session.set_simplified(simplified);
+            for key in keys.bytes() { assert!(session.key(i32::from(key))); }
+            assert_eq!(session.candidate(0), expected);
+            let info = session.candidate_info(0).unwrap();
+            assert_eq!(info.kind, CandidateKind::Unknown as u32);
+            assert_eq!(info.consumed_bytes, keys.len() as u64);
+        }
+    }
+}
+
+/// One wrong, extra, missing or swapped key in a word or a sentence, or a
+/// final typed the other way over a weak reading, gives the fixed reading
+/// first; readings spelled as typed and letters still being typed keep
+/// their leader, and the search does not grow the session's buffers.
+#[test]
+fn shipped_typo_fixes_lead_only_over_weak_readings() {
+    let mut lex = Lexicon::from_base_in_place(generated("mimo_base.bin"), true, None).unwrap();
+    let table = Pairs::in_place(generated("mimo_pairs.bin"), &lex.index().word_ids, None).unwrap();
+    lex.set_pairs(table);
+    let mut session = Session::new(Arc::new(lex));
+    session.set_simplified(true);
+    let typed = |session: &mut Session, keys: &str| {
+        session.clear();
+        for key in keys.bytes() { assert!(session.key(i32::from(key))); }
+    };
+    let fixed = [
+        ("haioyou", "还有"), ("gongtonfg", "共同"), ("jicfhang", "机场"), ("shuruyfa", "输入法"),
+        ("qidawi", "期待"), ("woxianzaikeyiuuijiama", "我现在可以回家吗"), ("xihuang", "喜欢"),
+        ("taiyan", "太阳"),
+    ];
+    for (keys, expected) in fixed {
+        typed(&mut session, keys);
+        assert_eq!(session.candidate(0), expected, "{keys}");
+        let info = session.candidate_info(0).unwrap();
+        assert_eq!(info.kind, CandidateKind::Correction as u32, "{keys}");
+        assert_eq!(info.consumed_bytes, keys.len() as u64);
+    }
+    for (keys, leader) in [("nishi", "你是"), ("nihaoa", "你好啊"), ("haiyou", "还有"), ("zhiji", "之际"), ("xianzai", "现在")] {
+        typed(&mut session, keys);
+        assert_eq!(session.candidate(0), leader, "{keys}");
+    }
+    // Still typing 餐厅: the last letters are not fixed into 餐饮 first.
+    typed(&mut session, "cantin");
+    assert_ne!(session.candidate(0), "餐饮");
+    assert!((0..5).any(|i| session.candidate(i) == "餐厅"));
+    for keys in ["woxianzaikeyiuuijiama", "gongtonfg", "haioyou"] {
+        typed(&mut session, keys);
+        let warm = session.capacity_signature();
+        typed(&mut session, keys);
+        assert_eq!(session.capacity_signature(), warm, "{keys} grew the buffers");
     }
 }

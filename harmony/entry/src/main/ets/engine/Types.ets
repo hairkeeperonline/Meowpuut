@@ -7,8 +7,8 @@ export enum InputMode {
   PINYIN = 'pinyin',
   ZHUYIN = 'zhuyin',
   JAPANESE = 'japanese',
-  /** 九键拼音（APK 0.9.1 新增）：设置页显示层已对齐，T9 引擎与 3×4 数字键盘暂未实现，
-   *  选择后引擎降级到全键拼音（见 SettingsPage 注释 + PARITY round 56）。 */
+  /** 九键拼音（round 62 内核更换后）：引擎原生九键会话（数字 2-9 直接组字，
+   *  解码/候选/部分消耗全在 Rust 核心里，见 Lexicons + Composer）。 */
   PINYIN9 = 'pinyin9',
 }
 

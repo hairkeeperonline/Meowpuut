@@ -1413,3 +1413,41 @@ if (this.composer.composing && this.lastPreviewAt > 0 &&
 2. 组字中（拼音未上屏）芯片不显示；组字提交后回来。
 3. 网页输入框/搜索框粘贴一次，记录是否生效（应用差异，非 bug）。
 4. hilog grep MeowpuutIME：应见 `paste action accepted`。
+
+## Round 62 — 内核更换为 Meowpuut-Core（hairkeeperonline fork @f8e5993）
+
+用户要求：把输入内核更换成 https://github.com/hairkeeperonline/Meowpuut-Core（新 Rust 引擎）。
+
+### 同步范围（fork → monorepo，保留全部 HarmonyOS 客户端代码）
+- `crates/` 全量替换：meowpuut-core 0.8.0（新 english.rs / abbrev.rs / pets.rs、改进的 decoder / fallback / latin / lexicon / api）、meowpuut-ffi（头文件新增原生九键会话、英文引擎、MPPets、皮肤包接口）、新增 meowpuut-pets / meowpuut-skin / meowpuut-skin-abi 三个 crate。
+- `DataSources/`、`Resources/Lexicon/` 全量替换（改进的数据，mimo-english 新增）。
+- 根 `Cargo.toml` + `Cargo.lock`、`THIRD_PARTY.md`、核心脚本（compile-native-lexicon.py、mimo_en_binary.py、mimo_english.py、blocked_terms.py、build-lexicon.sh、eval-*.py、check-no-volunteer.py、copy-lexicon-notices.py 等）、`Tests/`（golden / eval / pets-moments.json / skin-vectors 并入）。
+- 保留 monorepo 客户端：harmony/、Android/、iOS/、客户端脚本（build-harmony.sh、convert-script.py 等）。
+
+### 构建链路适配（Windows）
+- Rust 1.100.0 + ohos 双 target（aarch64 / x86_64-unknown-linux-ohos），.build/rust/harmony/<abi>/libmeowpuut_ffi.a 重编完成。
+- 词库全量重建（本地无 iOS/Generated 快照）：converter 改为 `.build/convert-script.bat`（OpenCC convert-script.py 包装，CreateProcess 可执行、cygpath 纯反斜杠路径回显），产物 staging 到 rawfile：mimo_base.bin（65.6MB，compact 后 -12MB）、mimo_pairs.bin、**mimo_en.bin（4.4MB，5 万词 / 56.6 万词对 / 11.3 万 next-words）**、native-japanese.tsv、mimo_jp.bin。
+- build-harmony.sh：LEXICON_FILES 加 mimo_en.bin；mimo_en_binary.py 纳入构建与 LEXICON_SOURCES。
+
+### NAPI 桥（napi_init.cpp + index.d.ts + NativeEngine.ets）
+新增导出：nineKeySessionCreate、inputText、textNoSuggest、attachEnglish、englishOpen / englishClose / englishWordCount、englishComplete / englishCorrect / englishPredict / englishNineKey（查询内部建/销毁 MPNEnglishQuery，返回 [text,kind,...] 平铺数组）、englishIsBlocked。englishOpen 用 copy=1（无 release 回调，不钉 ArrayBuffer）。
+
+### 九键重写（ArkTS T9 展开层退役，删除 T9.ets）
+- Lexicons：PINYIN9 会话改为 `nineKeySessionCreate`（数字 2-9 直接进组字）；复用守卫加 loadedNineKey（全键↔九键切换必重建会话）；拼音词库在建会话前 `attachEnglish(mimo_en.bin)`；t9Shadow 删除。
+- Composer：typePinyin9 会话化（key→takeCommitted→syncRaw→rebuild）；rebuild 走引擎候选（coreIndex 指向引擎列表，preedit = 引擎渲染的解码拼音 + 首选候选拼写）；choose 支持部分消耗（选词后剩余数字继续组字）；backspace 驱动会话；takeLiteral= 数字串。
+- 物理键盘数字 2-9 自动进九键会话；词库加载失败时仍直接上屏数字。
+
+### 英文引擎（ABC 模式，P1 范围）
+- Lexicons 另开独立 MPNEnglish 句柄（同一 mimo_en.bin，copy=1）。
+- MeowpuutAbility.updateEnglishRow：光标在词中 → englishComplete + englishCorrect 补全/纠错 chips（点选替换光标前词，deleteBackward 后 commit）；空格后 → englishPredict 下一词（commit 前自动补空格）；shift/caps 状态传 ENGLISH_SHIFT / ENGLISH_CAPS_LOCK flags。
+- updatePredictions 分流：english 模式走英文行；字母提交 / 空格 / 退格 / 标点 / 点选后各自刷新。
+
+### 遗留（P2，后续轮次）
+- MPPets（2884 字节状态机 moments）与皮肤包（meowpuut-skin-abi）已编进 .so 但 ArkTS 未接线；现有宠物进度走旧 ArkTS 规则。
+- 九键模式 ABC 页未接 englishNineKey（拼音九键已能通过 attach_english 出英文词候选）。
+- textNoSuggest 已暴露未接学习词过滤。
+
+### 产物
+- HAP 86.7MB（原 93.8MB）：libmeowpuut_napi.so 含全部新符号（mpn_nine_key_session_create / mpn_english_open / mpn_lexicon_attach_english 等，arm64+x86_64），rawfile 含 mimo_en.bin，modules.abc 含新 ArkTS 标记（nineKeySessionCreate / updateEnglishRow / englishReplace / loadedNineKey）。
+- 验证：全 crate 经 ohos 双 target 交叉编译（aarch64 / x86_64）；check-lexicon.py PASS（465,287 读音 / mimo_base 65.6MB / 853,302 词对 / never-volunteer 1,324 词 / 双原生索引核对）；宿主 cargo test 因本机无 MSVC link.exe 无法执行（纯工具链限制，非代码问题）。
+

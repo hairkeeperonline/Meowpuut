@@ -14,7 +14,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
-resources = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / '.build/Meowpuut.app/Contents/Resources'
+resources = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / '.build/lexicon'
 spec = importlib.util.spec_from_file_location('meowpuut_lexicon_compiler', ROOT / 'scripts/compile-native-lexicon.py')
 compiler = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(compiler)

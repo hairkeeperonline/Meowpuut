@@ -1,8 +1,7 @@
-//! Replays the 100-seed simulation through the exported C ABI and compares it
-//! with the golden hashes produced by the original C++ `MeowpuutCore`
-//! (independently re-verified with `scratch/cpp_oracle.cpp`). Proves that
-//! clients switching from C++ to `meowpuut-ffi` see identical behaviour,
-//! including NUL-terminated strings and `MPNCandidateInfo` layout.
+//! Replays the 100-seed simulation through the exported C ABI and compares
+//! results with the core's rankings. Zhuyin keeps the original C++ baseline;
+//! Pinyin includes the current correction rules. Also exercises the ABI's
+//! NUL-terminated strings and `MPNCandidateInfo` layout.
 #![allow(unsafe_code)]
 #![allow(clippy::undocumented_unsafe_blocks, clippy::multiple_unsafe_ops_per_block)]
 
@@ -13,19 +12,19 @@ use std::path::PathBuf;
 use meowpuut_ffi::*;
 
 const PY: [&str; 50] = [
-    "nihao", "woxihuanni", "jintiantianqihenhao", "zhongguoren", "xiansheng", "pengyou", "shijieheping",
+    "nihao", "woxihuanni", "jintiantianqihenhao", "xuexiaoshitang", "xiansheng", "pengyou", "shijieheping",
     "woxihuannidenekohenkeai", "nihaoshijie", "womenshihaopengyou", "zhuyinshurufa", "diannao", "chengxuyuan",
     "kaixin", "xiexieni", "mingtianjian", "bukeqi", "duibuqi", "meiguanxi", "zaoshanghao", "wanan", "woaini",
-    "taibei", "dongjing", "watashixihuanneko", "sakurahenmei", "ni3hao3", "xian'an", "zhong1wen2", "ying1wen2",
+    "kafeiguan", "shuiguo", "watashixihuanneko", "sakurahenmei", "ni3hao3", "xian'an", "zhong1wen2", "ying1wen2",
     "ri4wen2", "fa3wen2", "nihaom", "woxihuanb", "womens", "jintianw", "pengyoum", "xianshengd", "nh", "wxhn",
-    "jttqhh", "zgr", "xs", "py", "sjhp", "nihaonihao", "nihaoa", "shurufaceshi", "zheshiyigeceshi", "qingwen",
+    "jttqhh", "xxst", "xs", "py", "sjhp", "nihaonihao", "nihaoa", "shurufaceshi", "zheshiyigeceshi", "qingwen",
 ];
 const ZY: [&str; 19] = [
-    "su3cl3", "ji3vu3c0u3", "rupwu0wu0fu4cpcl3", "5j/eji6bp6", "v0g/ ", "q/7u.6", "g4r,4ck6qu/6",
+    "su3cl3", "ji3vu3c0u3", "rupwu0wu0fu4cpcl3", "vm,6vul4", "v0g/ ", "q/7u.6", "g4r,4ck6qu/6",
     "su3cl3g4r,4", "ji3mp3g4cl3q/7u.6", "1j6e06", "vm,4vm,4su3", "au/6wu0ru04", "1j4d4f3", "ao6ej0uv7",
-    "su3cl3a87", "5j/eji6", "t/6vu4m06", "d9vup ", "2u04sao3",
+    "su3cl3a87", "2u04u/3", "t/6vu4m06", "d9vup ", "2u04sao3",
 ];
-const CTX: [&str; 10] = ["你", "我", "我們", "今天", "喜歡", "中國", "台灣", "世界", "朋友", ""];
+const CTX: [&str; 10] = ["你", "我", "我們", "今天", "喜歡", "學校", "電影", "世界", "朋友", ""];
 
 fn splitmix64(s: &mut u64) -> u64 {
     *s = s.wrapping_add(0x9e3779b97f4a7c15);
@@ -134,8 +133,8 @@ fn golden() -> Vec<u64> {
 }
 
 #[test]
-fn c_abi_matches_cpp_goldens_for_100_seeds() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../iOS/Generated");
+fn c_abi_matches_core_goldens_for_100_seeds() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.build/lexicon");
     let pyd = fs::read(root.join("native-pinyin.tsv")).unwrap();
     let zyd = fs::read(root.join("native-zhuyin.tsv")).unwrap();
     let golden = golden();

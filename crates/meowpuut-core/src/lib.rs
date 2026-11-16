@@ -30,9 +30,11 @@
 //! assert_eq!(session.committed(), "你好");
 //! ```
 
+pub mod abbrev;
 pub mod bin_format;
 pub mod context_index;
 pub mod decoder;
+pub mod english;
 pub mod fallback;
 pub mod image;
 pub mod japanese;
@@ -41,7 +43,7 @@ pub mod lexicon;
 pub mod merge;
 pub mod mixed;
 pub mod mixed_prefix;
-pub mod nine_key;
+mod nine_key;
 pub mod pairs;
 pub mod predict;
 pub mod reading;
@@ -78,6 +80,8 @@ pub enum CandidateKind {
     Path = 2,
     Partial = 3,
     Correction = 4,
+    /// A reviewed Japanese word or a path containing one, in nine-key mode.
+    Japanese = 5,
 }
 
 /// Score provenance category for a generated candidate.
@@ -98,6 +102,8 @@ pub enum CandidateScoreKind {
     Lexicon = 1,
     Path = 2,
     Fallback = 3,
+    /// Syllable-initial correction with supporting dictionary evidence.
+    FuzzyInitial = 4,
 }
 
 /// Candidate metadata matching C `MPNCandidateInfo` bit-for-bit.

@@ -14,6 +14,7 @@ import { vibrator } from '@kit.SensorServiceKit';
 import { KeyCode, KeyEvent as InputKeyEvent, Action } from '@kit.InputKit';
 
 import { Composer } from '../engine/Composer';
+import { NativeEngine } from '../engine/NativeEngine';
 import { Lexicons } from '../engine/Lexicons';
 import { InputMode, Edit, Candidate } from '../engine/Types';
 import { CandidateMerge } from '../engine/CandidateMerge';
@@ -105,6 +106,8 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
   /** 物理键盘事件源（KeyboardDelegate），onCreate 时注册。 */
   private hwDelegate: inputMethodEngine.KeyboardDelegate | null = null;
   predictions: string[] = [];
+  /** 英文模式下 predictions[i] 要替换的光标前字符数（补全/纠错），预测则为 0。 */
+  private englishReplace: number[] = [];
   private pending: number[] = [];
   private caps = new Capitalization();
   private host: KeyboardHost = KeyboardHost.get();
@@ -787,12 +790,68 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
   }
 
   private updatePredictions(): void {
-    if (this.chineseActive) {
+    if (this.english) {
+      this.updateEnglishRow();
+    } else if (this.chineseActive) {
       const before = this.getTextBeforeCursor(8);
       this.predictions = this.composer.predictions(before);
     } else {
       this.predictions = [];
+      this.englishReplace = [];
     }
+  }
+
+  /** 【内核更换 round 62】英文引擎预测行（ABC 模式）：
+   * 光标在词中 → 补全 + 纠错（点选替换光标前词）；
+   * 光标在词尾/空格后 → 下一词预测。数据来自 mimo_en.bin。 */
+  private updateEnglishRow(): void {
+    const engine = this.lexicons !== null ? this.lexicons.englishEngine() : 0;
+    if (engine === 0) {
+      this.predictions = [];
+      this.englishReplace = [];
+      return;
+    }
+    const flags = (this.shift !== ShiftState.OFF ? NativeEngine.ENGLISH_SHIFT : 0) |
+      (this.shift === ShiftState.LOCKED ? NativeEngine.ENGLISH_CAPS_LOCK : 0);
+    const before = this.getTextBeforeCursor(64);
+    const match = before.match(/[A-Za-z'’]+$/);
+    const trailing: string = match !== null && match.length > 0 ? match[0] : '';
+    const words: string[] = [];
+    const replaces: number[] = [];
+    if (trailing.length >= 1) {
+      const context = before.substring(0, before.length - trailing.length);
+      const flat = NativeEngine.englishComplete(engine, trailing, context, flags);
+      const corrections = NativeEngine.englishCorrect(engine, trailing, context, flags);
+      const seen = new Set<string>();
+      for (let i = 0; i + 1 < flat.length; i += 2) {
+        const text = flat[i] as string;
+        if (text.length === 0 || seen.has(text)) continue;
+        seen.add(text);
+        words.push(text);
+        replaces.push(trailing.length);
+      }
+      for (let i = 0; i + 1 < corrections.length; i += 2) {
+        const text = corrections[i] as string;
+        if (text.length === 0 || seen.has(text)) continue;
+        seen.add(text);
+        words.push(text);
+        replaces.push(trailing.length);
+      }
+    } else {
+      const trimmed = before.replace(/\s+$/, '');
+      if (trimmed.length > 0) {
+        const flat = NativeEngine.englishPredict(engine, trimmed, flags);
+        for (let i = 0; i + 1 < flat.length; i += 2) {
+          const text = flat[i] as string;
+          if (text.length > 0) {
+            words.push(text);
+            replaces.push(0);
+          }
+        }
+      }
+    }
+    this.predictions = words.slice(0, 8);
+    this.englishReplace = replaces.slice(0, 8);
   }
 
   private typeEngine(code: number, alternate: string | null, asTyped: boolean = false): void {
@@ -807,6 +866,7 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     if (this.english) {
       this.commit(String.fromCharCode(c));
       this.letterTyped();
+      this.updatePredictions();
       return;
     }
     if (!this.composer.ready) {
@@ -853,6 +913,8 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     this.commit(' ');
     this.lastSpaceAt = now;
     this.predictions = [];
+    this.englishReplace = [];
+    if (this.english) this.updatePredictions();
     this.updateAutoCaps();
     this.refreshKeyboard();
   }
@@ -888,8 +950,10 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     }
     if (this.predictions.length > 0) {
       this.predictions = [];
+      this.englishReplace = [];
       this.refreshKeyboard();
     }
+    if (this.english) this.updatePredictions();
     // 有选中文本时，退格应删除选区内容（对照 Android onDelete 的 getSelectedText→commitText("",1)）。
     // HarmonyOS 无 getSelectedText，改用 selectionChange 回调跟踪 hasSelection。
     if (this.hasSelection) {
@@ -1101,6 +1165,19 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
   }
 
   onPrediction(text: string): void {
+    if (this.english) {
+      const index = this.predictions.indexOf(text);
+      const replace = index >= 0 && index < this.englishReplace.length ? this.englishReplace[index] : 0;
+      if (replace > 0) this.deleteBackward(replace);
+      if (replace === 0 && this.getTextBeforeCursor(1) !== ' ') this.commit(' ');
+      this.commit(text);
+      this.predictions = [];
+      this.englishReplace = [];
+      this.updateAutoCaps();
+      this.updatePredictions();
+      this.refreshKeyboard();
+      return;
+    }
     this.commit(text);
     this.updatePredictions();
     this.refreshKeyboard();
@@ -1109,6 +1186,8 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
   onPunctuation(mark: string): void {
     this.commit(mark);
     this.predictions = [];
+    this.englishReplace = [];
+    if (this.english) this.updatePredictions();
     this.refreshKeyboard();
   }
 
@@ -1186,8 +1265,6 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
       this.lexiconFailed = target !== InputMode.JAPANESE && session === 0;
       this.composer.japaneseWords = this.lexicons ? this.lexicons.japanese : JapaneseWords.EMPTY;
       this.composer.attach(target, session);
-      // 九键 shadow 查询会话（pinyin 词库时 Lexicons 已备好）。
-      this.composer.attachT9Shadow(this.lexicons !== null ? this.lexicons.t9Session() : 0);
       this.sessionMode = target;
       const queued = this.pending.slice();
       this.pending = [];

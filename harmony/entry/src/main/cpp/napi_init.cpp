@@ -475,6 +475,233 @@ napi_value Predict(napi_env env, napi_callback_info info) {
   return result;
 }
 
+
+// ---------------------------------------------------------------------------
+// 新内核（Meowpuut-Core 0.8）：原生九键会话、原文输入、不主动词过滤。
+// ---------------------------------------------------------------------------
+
+napi_value NineKeySessionCreate(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value args[1];
+  napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+  int64_t lex = 0;
+  napi_get_value_int64(env, args[0], &lex);
+  MPNSession *session =
+      mpn_nine_key_session_create(reinterpret_cast<const MPNLexicon *>(static_cast<intptr_t>(lex)));
+  napi_value result;
+  napi_create_double(env, static_cast<double>(reinterpret_cast<intptr_t>(session)), &result);
+  return result;
+}
+
+napi_value InputText(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value args[1];
+  napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+  int64_t s = 0;
+  napi_get_value_int64(env, args[0], &s);
+  return ToJS(env, mpn_input_text(SESSION(s)));
+}
+
+napi_value TextNoSuggest(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value args[2];
+  napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+  int64_t s = 0;
+  napi_get_value_int64(env, args[0], &s);
+  char *text = FromJS(env, args[1]);
+  int flagged = (text && text[0]) ? mpn_text_no_suggest(SESSION(s), text) : 0;
+  free(text);
+  napi_value result;
+  napi_get_boolean(env, flagged != 0, &result);
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// 英文引擎（mimo_en.bin，MIMO-EN-1）。englishOpen 用 copy=1：引擎自行复制
+// 字节，无需钉住 ArkTS 的 ArrayBuffer（mpn_english_open 没有 release 回调，
+// 与中文词典的 in-place 模式不同）。
+// ---------------------------------------------------------------------------
+
+#define ENGLISH(h) reinterpret_cast<MPNEnglish *>(static_cast<intptr_t>(h))
+
+napi_value EnglishOpen(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value args[1];
+  napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+  napi_value result;
+  napi_get_null(env, &result);
+  bool is_typed_array = false;
+  if (argc < 1) return result;
+  napi_is_typedarray(env, args[0], &is_typed_array);
+  if (!is_typed_array) return result;
+  napi_typedarray_type type;
+  size_t length = 0;
+  void *ptr = nullptr;
+  napi_value arraybuffer;
+  size_t byte_offset = 0;
+  napi_get_typedarray_info(env, args[0], &type, &length, &ptr, &arraybuffer, &byte_offset);
+  if (type != napi_uint8_array || ptr == nullptr || length == 0) return result;
+  MPNEnglish *english = mpn_english_open(ptr, length, 1);
+  napi_create_double(env, static_cast<double>(reinterpret_cast<intptr_t>(english)), &result);
+  return result;
+}
+
+napi_value EnglishClose(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value args[1];
+  napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+  int64_t h = 0;
+  napi_get_value_int64(env, args[0], &h);
+  mpn_english_close(ENGLISH(h));
+  napi_value result;
+  napi_get_undefined(env, &result);
+  return result;
+}
+
+napi_value EnglishWordCount(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value args[1];
+  napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+  int64_t h = 0;
+  napi_get_value_int64(env, args[0], &h);
+  napi_value result;
+  napi_create_double(env, static_cast<double>(mpn_english_word_count(ENGLISH(h))), &result);
+  return result;
+}
+
+// 可空字符串参数：null/undefined 传 nullptr，否则 UTF-8。
+static char *OptionalString(napi_env env, napi_value value) {
+  napi_valuetype type;
+  napi_typeof(env, value, &type);
+  if (type == napi_null || type == napi_undefined) return nullptr;
+  return FromJS(env, value);
+}
+
+// 一次查询返回一个数组：[text0, kind0, text1, kind1, ...]（每个英文操作最多 8 个结果）。
+static napi_value EnglishQueryRun(napi_env env, MPNEnglishQuery *query, size_t count) {
+  napi_value result = NewStringArray(env, count * 2);
+  for (size_t i = 0; i < count; i++) {
+    napi_set_element(env, result, i * 2, ToJS(env, mpn_english_text(query, i)));
+    napi_value kind;
+    napi_create_int64(env, mpn_english_kind(query, i), &kind);
+    napi_set_element(env, result, i * 2 + 1, kind);
+  }
+  return result;
+}
+
+napi_value EnglishComplete(napi_env env, napi_callback_info info) {
+  size_t argc = 4;
+  napi_value args[4];
+  napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+  int64_t h = 0;
+  napi_get_value_int64(env, args[0], &h);
+  uint32_t flags = 0;
+  napi_get_value_uint32(env, args[3], &flags);
+  char *prefix = FromJS(env, args[1]);
+  char *before = OptionalString(env, args[2]);
+  MPNEnglishQuery *query = mpn_english_query_create();
+  size_t count = prefix ? mpn_english_complete(query, ENGLISH(h), prefix, before, flags) : 0;
+  napi_value result = EnglishQueryRun(env, query, count);
+  mpn_english_query_destroy(query);
+  free(prefix);
+  free(before);
+  return result;
+}
+
+napi_value EnglishCorrect(napi_env env, napi_callback_info info) {
+  size_t argc = 4;
+  napi_value args[4];
+  napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+  int64_t h = 0;
+  napi_get_value_int64(env, args[0], &h);
+  uint32_t flags = 0;
+  napi_get_value_uint32(env, args[3], &flags);
+  char *word = FromJS(env, args[1]);
+  char *before = OptionalString(env, args[2]);
+  MPNEnglishQuery *query = mpn_english_query_create();
+  size_t count = word ? mpn_english_correct(query, ENGLISH(h), word, before, flags) : 0;
+  napi_value result = EnglishQueryRun(env, query, count);
+  mpn_english_query_destroy(query);
+  free(word);
+  free(before);
+  return result;
+}
+
+napi_value EnglishPredict(napi_env env, napi_callback_info info) {
+  size_t argc = 3;
+  napi_value args[3];
+  napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+  int64_t h = 0;
+  napi_get_value_int64(env, args[0], &h);
+  uint32_t flags = 0;
+  napi_get_value_uint32(env, args[2], &flags);
+  char *before = OptionalString(env, args[1]);
+  MPNEnglishQuery *query = mpn_english_query_create();
+  size_t count = before ? mpn_english_predict(query, ENGLISH(h), before, flags) : 0;
+  napi_value result = EnglishQueryRun(env, query, count);
+  mpn_english_query_destroy(query);
+  free(before);
+  return result;
+}
+
+napi_value EnglishNineKey(napi_env env, napi_callback_info info) {
+  size_t argc = 4;
+  napi_value args[4];
+  napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+  int64_t h = 0;
+  napi_get_value_int64(env, args[0], &h);
+  uint32_t flags = 0;
+  napi_get_value_uint32(env, args[3], &flags);
+  char *digits = FromJS(env, args[1]);
+  char *before = OptionalString(env, args[2]);
+  MPNEnglishQuery *query = mpn_english_query_create();
+  size_t count = digits ? mpn_english_nine_key(query, ENGLISH(h), digits, before, flags) : 0;
+  napi_value result = EnglishQueryRun(env, query, count);
+  mpn_english_query_destroy(query);
+  free(digits);
+  free(before);
+  return result;
+}
+
+napi_value EnglishIsBlocked(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value args[2];
+  napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+  int64_t h = 0;
+  napi_get_value_int64(env, args[0], &h);
+  char *word = FromJS(env, args[1]);
+  int blocked = word ? mpn_english_is_blocked(ENGLISH(h), word) : 0;
+  free(word);
+  napi_value result;
+  napi_get_boolean(env, blocked != 0, &result);
+  return result;
+}
+
+// 给中文（拼音/九键）词库挂上英文词（新内核：拼音与九键打字出英文词，
+// 排在中文之后，屏蔽词永不主动出）。
+napi_value AttachEnglish(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value args[2];
+  napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+  napi_value result;
+  napi_get_boolean(env, false, &result);
+  if (argc < 2) return result;
+  int64_t lex = 0;
+  napi_get_value_int64(env, args[0], &lex);
+
+  const char *data = nullptr;
+  size_t size = 0;
+  AssetRef *asset = nullptr;
+  if (!PinTypedArray(env, args[1], &data, &size, &asset)) return result;
+
+  int attached = mpn_lexicon_attach_english(LEXICON(lex), data, size, ReleaseAsset, asset);
+  if (!attached) {
+    ReleaseAsset(asset);
+  }
+  napi_get_boolean(env, attached != 0, &result);
+  return result;
+}
+
 napi_value Init(napi_env env, napi_value exports) {
   napi_property_descriptor desc[] = {
       {"lexiconCreateFromBase", nullptr, LexiconCreateFromBase, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -498,6 +725,18 @@ napi_value Init(napi_env env, napi_value exports) {
       {"mixedPinyin", nullptr, MixedPinyin, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"mixedPinyinPrefix", nullptr, MixedPinyinPrefix, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"predict", nullptr, Predict, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"nineKeySessionCreate", nullptr, NineKeySessionCreate, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"inputText", nullptr, InputText, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"textNoSuggest", nullptr, TextNoSuggest, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"attachEnglish", nullptr, AttachEnglish, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"englishOpen", nullptr, EnglishOpen, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"englishClose", nullptr, EnglishClose, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"englishWordCount", nullptr, EnglishWordCount, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"englishComplete", nullptr, EnglishComplete, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"englishCorrect", nullptr, EnglishCorrect, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"englishPredict", nullptr, EnglishPredict, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"englishNineKey", nullptr, EnglishNineKey, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"englishIsBlocked", nullptr, EnglishIsBlocked, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
   return exports;
