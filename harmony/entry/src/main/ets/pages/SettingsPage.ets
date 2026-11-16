@@ -14,7 +14,7 @@ import { Palette, Tone, GlassStrength, Look } from '../ui/Theme';
 import { GlassShape, traceOutline } from '../ui/GlassOutline';
 import { Box } from '../ui/Geometry';
 import { display } from '@kit.ArkUI';
-import mediaquery from '@ohos.mediaquery';
+import type mediaquery from '@ohos.mediaquery';
 
 /** 输入法启用状态（对照 Android SettingsActivity.updateStatus）。 */
 enum ImeStatus {
@@ -80,9 +80,18 @@ struct SettingsPage {
   }
 
   aboutToAppear(): void {
-    this.darkQuery = mediaquery.matchMediaSync('(prefers-color-mode: dark)');
-    this.isDark = this.darkQuery.matches;
-    this.darkQuery.on('change', this.darkCb);
+    // 【真机反馈 round 63-2】设置页闪退修复：全局 mediaquery.matchMediaSync 在部分
+    // 真机运行时未绑定，aboutToAppear 直接抛错导致页面进不去。改为只走
+    // UIContext.getMediaQuery()（API 12+，import type 保证模块零运行时依赖），
+    // try/catch 兜底——检测失败只是退回浅色渲染，页面功能不受影响。
+    try {
+      this.darkQuery = this.getUIContext().getMediaQuery().matchMediaSync('(prefers-color-mode: dark)');
+      this.isDark = this.darkQuery.matches;
+      this.darkQuery.on('change', this.darkCb);
+    } catch (e) {
+      this.darkQuery = null;
+      this.isDark = false;
+    }
     this.headerMaterial = SettingsPage.makeMaterial();
     const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
     this.prefs.init(ctx).then(() => {

@@ -1474,3 +1474,5 @@ if (this.composer.composing && this.lastPreviewAt > 0 &&
 **验证**：hvigor 全量编译通过（含 ArkTS 类型检查）；真机复验点：系统深色下打开设置页、按下功能键观察微缩、展开面板无候选时看爪印。
 
 **追加修复（同轮）**：摸猫第一下的「黑点」——米米莫每次、莫莫第 1 下 `onPet` 走空文案（对照 Android 拍第 1 下不出提示），但 `pet()` 照样启动了 toast 计时器，`drawToast` 渲染出 48×30 空深色胶囊悬在候选栏中央。修复：`pet()` 只在有文案或爱心进度时才装填 toast；空内容也不打断正在显示的进度提示。
+
+**追加修复 2（同轮）**：真机闪退——设置页打不开。根因：深色检测用的全局 `mediaquery.matchMediaSync` 在真机运行时未绑定，且它是 aboutToAppear 第一句（未捕获 → 页面直接死）。修复：改走 `UIContext.getMediaQuery()`（API 12+，import type 消除模块运行时依赖），try/catch 兜底，失败退回浅色渲染。
