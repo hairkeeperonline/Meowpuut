@@ -1515,3 +1515,25 @@ if (this.composer.composing && this.lastPreviewAt > 0 &&
 **遗留（下轮候选）**：OffscreenCanvas 玻璃静态层缓存（~2800 Point2D/帧的 traceOutline，风险高需真机验证）；Prefs.unsubscribe（订阅对象为私有字段，onDestroy 泄漏轻微）；editorAction() 的实时 getEditorAttributeSync 可用 enterKeyTypeCached 同法收敛；TouchHost.clearVisuals 因 cancelAll 删除成为新死接口；九键 maximumWidth 仅对宽屏生效（手机竖屏 <460dp 无视觉差异）。
 
 **验证**：hvigor 全量编译通过（ArkTS 严格类型检查含）。真机复验点：①九键新结构（侧列删除/重输、「1」=分词、长按 ABC 出 2、底行地球与展开删除）②符号页翻页（#+=↔123）与底行 ☺ 入口 ③空闲挂机 5 分钟再打字无变卡 ④连续打字跟手度 ⑤物理键盘 onDestroy 后无残留监听（hilog）。
+
+### 追加：round 64 真机联调（同轮，hdc 驱动 + uitest 注入 + hilog 取证）
+
+调试链路：hdc 安装签名 HAP → `aa start` 设置页 → uitest 点试打框唤起键盘 → 按 layoutKeyGrid 度量计算按键屏幕坐标（density=3.0）注入点击 → dumpLayout 读输入框 originalText 验证行为 → hilog MeowpuutIME 分发日志佐证。屏幕阅读不可用（键位为 Canvas 绘制，a11y 树只有画布节点），全靠输入框文本与日志当「眼睛」。
+
+**P0 清单结果**（14 项全过，其中 6 项为真机发现并当场修复的 bug）：
+- ✅ 九键退格（侧列删除键）、重输、长挂数字出数字、底行地球与展开删除、符号页 `#+=`↔`123` 与 ☺ 底行入口、九键数字页往返、emoji 上屏、设置页稳定
+- ✅ 性能：空闲 46s `since gc:939136` 纹丝不动（零分配轮询定量证实）；连打无漏键
+
+**真机修复 1（重输/ESCAPE 预览残留）**：重输键点击到达分发层（hilog `dispatch kind=clearComposition enabled=true composing=true`）但组字预览留在输入框——`composer.clear()` 只清内部状态。补 `syncComposingText(wasComposing, '')` 丢弃预览（对齐安卓 `commitText("", 1)`）+ 清过期 predictions；硬件 ESCAPE 键同病同修（其注释「组字未写入输入框」在预览功能上线后已失效）。
+
+**真机修复 2（九键分词被拒收）**：「1」分词键按下直接把当前音节顶候选上屏（`'一'`）——`Composer.typePinyin9` 的 `c<'2'||c>'9'` 检查拒收撇号，走 finishComposition 兜底。而 Rust 核心九键会话原生支持 SEPARATOR（`raw "94'26"` 切分）。修后 9,4,',2,6 → 组字 `xi'an` → 点候选「西安」上屏 ✓（修复前不可能出现——顺带打通了跨段候选）。
+
+**真机修复 3（地球键切换被拒）**：hilog `switchSubtype failed: input method manager service error`——`name` 字段填了 subtypeId，而系统注册时 name=bundle 名（设置页早有此教训并注释，ability 侧漏改）。改 `name: 'com.krysta1ll.meowpuut.ohos'` 后地球键在注音/拼音/九键/日语间正常轮换。
+
+**真机修复 4（组字收尾后符号错序）**：组字 a + 点表情 → 「22😄啊」（😄 插到了收尾词「啊」前面）。根因：`finishComposition` 的预览落地（setPreviewText+finishTextPreview）排异步串行链，而紧跟的 `commit()` 用同步 `insertTextSync` 抢跑，把文本插进预览区起点。新增 `commitAfterPreview`（插入排进同一串行链），typeSymbol、typeEngine 备选路径、引擎拒收字符路径三处接入。修后 a + 表情 → 「啊😄」✓。
+
+**真机修复 5（展开面板盖满键区——结构性移植偏差）**：展开态面板画满整个键区画布且 `return` 跳过全部按键绘制，触控也全路由给面板——**底行完全消失/失灵**，面板未裁剪的命中测试还吞掉底行点击（点展开删除位结果上屏了候选）。安卓语义：ExpandedPanelView 独立视图只盖 `panelHeight = topPadding+(rows-1)×(keyHeight+rowGap)-rowGap/2`，底行照常绘制并响应（展开删除键正因此存在）。修复：新增 `expandedPanelHeight()`；drawKeys 展开态画面板（panelHeight 高）后照常画底行；handleTouch 按手势起点分界路由（面板高度内→面板，底行→按键，panelPointers 集合模拟独立视图触点捕获）；panelMaxScroll 按面板可见高度。修后：⌄ 展开 → 点展开删除位真实删除组字字符（'yi'→'9'）✓，面板候选点击上屏（「哇」）✓，收起后按键恢复 ✓。
+
+**调试日志**：dispatchKey 入口与 onToggleExpanded 加了 info 级 hilog（MeowpuutIME 域），供后续真机排查（按键分发/展开触发一键定位）；info 级异步缓冲，无性能影响。
+
+**遗留（下轮候选）**：日文/繁体符号页内容为代码级核对（真机无视觉通道，需人工瞄一眼）；物理键盘 ESCAPE 修复未插物理键盘复测；英文预测行/悬浮拖拽/粘贴芯片沿用前轮代码（未在本轮真机重测）。

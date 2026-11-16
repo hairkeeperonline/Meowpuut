@@ -483,6 +483,9 @@ export struct MeowpuutKeyboard {
   private lastCommitToken = -1;
   private lastPetToken = -1;
   private lastAnnounceToken = -1;
+  /** 【round 64 真机修复】展开态手势归属：DOWN 落在面板高度内的指针 id 集合
+   *  （整条手势跟随起点路由，模拟安卓独立视图的触点捕获）。 */
+  private panelPointers: Set<number> = new Set();
 
   private pollHost(): void {
     this.pollTimer = setInterval(() => {
@@ -846,6 +849,16 @@ export struct MeowpuutKeyboard {
       Math.max(0, rows - 1) * m.rowGap + m.bottomPadding;
   }
 
+  /** 展开面板可见高度（键区画布本地 vp，对照安卓 panelHeight(metrics)）：
+   *  盖住底行以上的全部行；底行留给按键（含展开删除键）。 */
+  private expandedPanelHeight(): number {
+    const m = this.metrics;
+    const ctx = this.state.keyCtx;
+    const baseRows = ctx.mode === InputMode.ZHUYIN && !ctx.english ? 5 : 4;
+    const rows = this.keySet !== null ? this.keySet.rows.length : baseRows;
+    return m.topPadding + (rows - 1) * (m.keyHeight + m.rowGap) - m.rowGap / 2;
+  }
+
   private keyboardRegionHeight(): number {
     const region = new CandidateRegionLayout(this.kbWidth, this.idiom, this.state.keyboard.cats);
     return region.height;
@@ -922,15 +935,41 @@ export struct MeowpuutKeyboard {
 
   private handleTouch(event: TouchEvent): void {
     if (this.touches === null) return;
-    // 展开面板覆盖键区时，键区触控全部交给面板（点候选 + 纵向滚动）。
     if (this.state.expanded && this.state.composing) {
-      this.handlePanelTouch(event);
+      // 【round 64 真机修复】展开态分界路由：面板只接收底行以上的触点，底行照常
+      // 走按键（对照安卓：ExpandedPanelView 是独立视图只盖自身高度，触点落在底行
+      // 时由 KeysView 处理——展开删除键就是这样工作的）。归属按手势起点（DOWN
+      // 的位置）判定并跟随整条手势，模拟独立视图的触点捕获；此前整块键区画布
+      // 的触控全交给面板，底行失灵且面板未裁剪的命中测试吞掉底行点击。
+      const split = this.expandedPanelHeight();
+      for (const change of event.changedTouches) {
+        if (change.type === TouchType.Down) {
+          if (change.y < split) this.panelPointers.add(change.id);
+          else this.panelPointers.delete(change.id);
+        }
+      }
+      let toPanel = false;
+      let toKeys = false;
+      for (const change of event.changedTouches) {
+        if (this.panelPointers.has(change.id)) toPanel = true; else toKeys = true;
+      }
+      if (toPanel) this.handlePanelTouch(event);
+      if (toKeys) this.handleKeysTouch(event);
       return;
     }
+    // 面板收起后清手势归属，防止旧指针 id 卡住按键路由。
+    if (this.panelPointers.size > 0) this.panelPointers.clear();
+    this.handleKeysTouch(event);
+  }
+
+  /** 键区按键触控（从 handleTouch 拆出：展开态底行与常态共用）。 */
+  private handleKeysTouch(event: TouchEvent): void {
+    if (this.touches === null) return;
     for (const change of event.changedTouches) {
       const x = change.x;
       const y = change.y;
       if (change.type === TouchType.Down) {
+        if (this.panelPointers.has(change.id)) continue;
         this.touches.down(change.id, x, y);
       } else if (change.type === TouchType.Move) {
         this.touches.move(change.id, x, y);
@@ -1787,14 +1826,20 @@ export struct MeowpuutKeyboard {
     ctx.closePath();
     ctx.fill();
 
-    // 展开面板：覆盖键区的候选网格，不画按键。
-    if (this.state.expanded && this.state.composing) {
-      this.drawPanel(ctx, total);
-      return;
+    // 展开面板（round 64 真机修复）：只覆盖底行以上的区域（对照安卓
+    // KeyboardView.panelHeight(metrics) = topPadding+(rows-1)×(keyHeight+rowGap)-rowGap/2，
+    // ExpandedPanelView 独立视图只盖自身高度）——底行照常绘制并照常响应触控，
+    // 展开态底行的删除键（bottomRow 的 expanded 槽位）因此可见可用。
+    // 此前面板盖满整个键区且 return 跳过全部按键绘制：底行消失、触控全被
+    // 面板吞掉（真机：点展开删除位结果上屏了面板候选）。
+    const expandedNow = this.state.expanded && this.state.composing;
+    if (expandedNow) {
+      this.drawPanel(ctx, this.expandedPanelHeight());
     }
+    const rowStart = expandedNow ? keySet.rows.length - 1 : 0;
 
     const cursorMode = this.touches?.cursorMode ?? false;
-    for (let r = 0; r < keySet.rows.length; r++) {
+    for (let r = rowStart; r < keySet.rows.length; r++) {
       const rowKeys = keySet.rows[r];
       const rowPlaces = placements[r];
       for (let c = 0; c < rowKeys.length; c++) {
@@ -1891,7 +1936,8 @@ export struct MeowpuutKeyboard {
   }
 
   private panelMaxScroll(): number {
-    const h = this.keysAreaHeight();
+    // 【round 64 真机修复】滚动范围按面板可见高度（底行以上），不是整个键区高度。
+    const h = this.expandedPanelHeight();
     return Math.max(0, this.panelContentHeight - h);
   }
 
@@ -1932,6 +1978,8 @@ export struct MeowpuutKeyboard {
       const x = change.x;
       const y = change.y;
       if (change.type === TouchType.Down) {
+        // 底行手势的 DOWN 不进面板（归属见 handleTouch 的分界路由）。
+        if (!this.panelPointers.has(change.id)) continue;
         this.panelDragId = change.id;
         this.panelDownY = y;
         this.panelDownScroll = this.panelScroll;

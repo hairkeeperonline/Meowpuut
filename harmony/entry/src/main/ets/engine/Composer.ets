@@ -85,10 +85,16 @@ export class Composer {
     }
   }
 
-  /** 九键数字输入：只接受 2-9（0/1 不在此路径），直接进九键会话。 */
+  /** 九键数字输入：数字 2-9 与分词符 ' 直接进引擎原生九键会话（解码在 Rust 核心）。
+   *  round 64 真机修复：撇号此前被 2-9 检查拒收（handled=false → 触发 finishComposition
+   *  提交顶候选），而 Rust nine_key 会话原生支持 SEPARATOR（raw "94'26" → 在位 2 切分，
+   *  跨段解码出西安这类候选——对齐安卓九键分词行为）。引擎侧只在数字后接受撇号，
+   *  传参被拒时仍返回 handled=false 走旧路径，语义不变。 */
   private typePinyin9(c: string): Edit {
     if (this.session === 0) return { handled: false, commit: '' };
-    if (c < '2' || c > '9') return { handled: false, commit: '' };
+    const digit = c >= '2' && c <= '9';
+    const separator = c === "'" && this.raw.length > 0 && !this.raw.endsWith("'");
+    if (!digit && !separator) return { handled: false, commit: '' };
     if (this.raw.length >= 12) return { handled: true, commit: '' };
     if (!NativeEngine.key(this.session, c.charCodeAt(0))) {
       return { handled: false, commit: '' };

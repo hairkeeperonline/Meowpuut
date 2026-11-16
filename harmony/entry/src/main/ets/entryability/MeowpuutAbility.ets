@@ -881,8 +881,14 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
 
   private typeEngine(code: number, alternate: string | null, asTyped: boolean = false): void {
     if (alternate !== null) {
+      const wasComposing = this.composer.composing;
       this.finishComposition();
-      this.commit(alternate);
+      if (wasComposing && this.previewSupported) {
+        // 长按备选上屏同样要排在组字收尾的预览链之后（同 typeSymbol 的错序修复）。
+        this.commitAfterPreview(alternate);
+      } else {
+        this.commit(alternate);
+      }
       this.letterTyped();
       return;
     }
@@ -909,7 +915,12 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     const edit = this.composer.type(c);
     if (!edit.handled) {
       this.finishComposition();
-      this.commit(String.fromCharCode(c));
+      if (wasComposing && this.previewSupported) {
+        // 未被引擎接受的字符：同样排在组字收尾预览链之后（错序修复同 typeSymbol）。
+        this.commitAfterPreview(String.fromCharCode(c));
+      } else {
+        this.commit(String.fromCharCode(c));
+      }
       return;
     }
     this.predictions = [];
@@ -917,9 +928,36 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     if (!asTyped) this.letterTyped();
   }
 
+  /** 【round 64 真机修复】把一次文本插入排到预览串行链末尾：组字收尾紧跟符号上屏。
+   *  finishComposition 的预览落地（setPreviewText+finishTextPreview）是异步链上的
+   *  IPC；若后续符号直接走同步 insertTextSync，会抢在预览替换之前把文本插到预览区
+   *  起点——真机复现：组字 a + 点表情 → 「22😄啊」（😄 插在了收尾词「啊」前面，
+   *  应为「22啊😄」）。排进同一串行链保证顺序。 */
+  private commitAfterPreview(text: string): void {
+    const client = this.inputClient;
+    if (client === null) return;
+    const op = (): Promise<void> => {
+      try {
+        client.insertTextSync(text);
+        return Promise.resolve();
+      } catch (e) {
+        return client.insertText(text).then(() => {});
+      }
+    };
+    this.previewChain = this.previewChain.then(op).catch(() => {
+      this.previewSupported = false;
+    });
+  }
+
   private typeSymbol(text: string): void {
+    const wasComposing = this.composer.composing;
     this.finishComposition();
-    this.commit(text);
+    if (wasComposing && this.previewSupported) {
+      // 组字收尾的预览链刚排了落地操作：符号必须排在它后面（见 commitAfterPreview）。
+      this.commitAfterPreview(text);
+    } else {
+      this.commit(text);
+    }
     if (this.page > 0 && !this.numericField && AUTO_RETURN_MARKS.has(text)) this.page = 0;
     this.predictions = [];
     this.refreshKeyboard();
@@ -1061,7 +1099,10 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     const next: string = order[(order.indexOf(current) + 1) % order.length];
     const target: InputMethodSubtype = {
       id: next,
-      name: next,
+      // round 64 真机修复：name 必须是 bundle 名（同设置页 SettingsPage 的教训——
+      // 系统注册时 name 填的就是 bundle 名，填 subtypeId 会被拒绝：真机 hilog
+      // 「switchSubtype failed: input method manager service error」）。
+      name: 'com.krysta1ll.meowpuut.ohos',
       locale: next === 'MeowpuutJapanese' ? 'ja-JP'
         : next === 'MeowpuutZhuyin' ? 'zh-TW' : 'zh-CN',
       language: next === 'MeowpuutJapanese' ? 'ja'
@@ -1217,6 +1258,7 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
   }
 
   onToggleExpanded(): void {
+    hilog.info(0x0000, 'MeowpuutIME', `toggleExpanded fired (composing=${this.composer.composing}, was=${this.expanded})`);
     if (!this.composer.composing && !this.expanded) return;
     this.expanded = !this.expanded;
     if (this.expanded && this.composer.candidates.length < 120) this.composer.loadMore();
@@ -1423,10 +1465,13 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
         break;
       case KeyCode.KEYCODE_ESCAPE:
         if (composing) {
-          // Harmony 的组字只在候选栏显示、尚未写入输入框，直接清空内部状态并刷新即可。
-          // （Android 需要 commitText("", 1) 清 composing span，这里无此概念。）
+          // round 64 真机修复：组字经 setPreviewText 真实写入编辑框预览区（与旧注释
+          // 相反），ESCAPE 清组字必须同步丢弃预览（对齐安卓 clearComposition 的
+          // commitText("", 1)），否则预览残留在输入框。
           this.composer.clear();
           this.expanded = false;
+          this.predictions = [];
+          this.syncComposingText(composing, '');
           this.refreshKeyboard();
           handled = true;
         }
@@ -1508,6 +1553,8 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
 
   dispatchKey(key: Key, text: string | null): void {
     const action = key.action;
+    // 【调试 round 64】按键分发诊断（真机定位用，后续可移除）。
+    hilog.info(0x0000, 'MeowpuutIME', `dispatch kind=${action.kind} enabled=${key.enabled} composing=${this.composer.composing}`);
     if (action instanceof KeyActionEngine) {
       this.typeEngine(action.code, text);
     } else if (action instanceof KeyActionText) {
@@ -1522,15 +1569,21 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
         case 'return': this.enter(); break;
         case 'globe': this.switchKeyboard(); break;
         case 'toggleEnglish': this.toggleEnglish(); break;
-        // 【九键 round 63-6】重输：清空当前组字（对照安卓 ClearComposition；同硬件
-        // ESCAPE 键的既有语义：composer.clear + 收面板 + 刷新）。
-        case 'clearComposition':
-          if (this.composer.composing) {
+        // 【九键 round 63-6】重输：清空当前组字（对照安卓 ClearComposition）。
+        // round 64 真机修复：预览功能上线后组字文本真实存在于编辑框预览区，
+        // 仅 composer.clear() 会把预览残留在输入框——必须补 syncComposingText
+        // 丢弃预览（对齐安卓 commitText("", 1)），并清掉过期 predictions。
+        case 'clearComposition': {
+          const wasComposing = this.composer.composing;
+          if (wasComposing) {
             this.composer.clear();
             this.expanded = false;
+            this.predictions = [];
+            this.syncComposingText(wasComposing, '');
             this.refreshKeyboard();
           }
           break;
+        }
         default: break;
       }
     }
