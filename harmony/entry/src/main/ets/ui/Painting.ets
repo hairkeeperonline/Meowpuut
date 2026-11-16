@@ -237,6 +237,35 @@ export class Glyphs {
     ctx.restore();
   }
 
+  /** 【剪贴板芯片 round 61】小剪贴板图标：圆角板身 + 顶部压夹，细线描边。 */
+  static clipboard(ctx: Canvas2D, cx: number, cy: number, size: number, color: string): void {
+    const w = size * 0.78;
+    const h = size;
+    const left = cx - w / 2;
+    const top = cy - h / 2 + size * 0.06;
+    ctx.save();
+    ctx.lineWidth = Math.max(1.2, size * 0.09);
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = color;
+    // 板身。
+    roundRect(ctx, left, top, w, h, size * 0.12);
+    ctx.stroke();
+    // 压夹：板顶小圆角矩形（横跨上沿）。
+    const cw = w * 0.52;
+    roundRect(ctx, cx - cw / 2, top - size * 0.12, cw, size * 0.24, size * 0.08);
+    ctx.fillStyle = color;
+    ctx.fill();
+    // 板面两条短横线示意内容。
+    ctx.beginPath();
+    ctx.moveTo(left + w * 0.26, cy + size * 0.08);
+    ctx.lineTo(left + w * 0.74, cy + size * 0.08);
+    ctx.moveTo(left + w * 0.26, cy + size * 0.3);
+    ctx.lineTo(left + w * 0.58, cy + size * 0.3);
+    ctx.lineWidth = Math.max(1, size * 0.07);
+    ctx.stroke();
+    ctx.restore();
+  }
+
   static chevron(ctx: Canvas2D, cx: number, cy: number, width: number, up: boolean, color: string): void {
     const h = width * 0.5;
     const dir = up ? -1 : 1;

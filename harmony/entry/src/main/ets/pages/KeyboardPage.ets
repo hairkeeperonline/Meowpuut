@@ -66,6 +66,7 @@ struct KeyboardPage {
         onTickEvt: () => this.host.callbacks?.onTick(),
         onCandidateEvt: (index: number) => this.host.callbacks?.onCandidate(index),
         onPredictionEvt: (text: string) => this.host.callbacks?.onPrediction(text),
+        onPasteEvt: () => this.host.callbacks?.onPaste(),
         onPunctuationEvt: (mark: string) => this.host.callbacks?.onPunctuation(mark),
         onToggleExpandedEvt: () => this.host.callbacks?.onToggleExpanded(),
         onPetEvt: (cat: string) => this.host.callbacks?.onPet(cat),

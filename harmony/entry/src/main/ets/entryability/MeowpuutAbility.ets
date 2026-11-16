@@ -58,6 +58,7 @@ class AbilityCallbacks implements KeyboardCallbacks {
   onPet(cat: string): void { this.ability.onPet(cat); }
   onDragPanel(dx: number, dy: number): void { this.ability.dragPanel(dx, dy); }
   onHide(): void { this.ability.hideByPullDown(); }
+  onPaste(): void { this.ability.pasteFromClipboard(); }
 }
 
 export default class MeowpuutAbility extends InputMethodExtensionAbility {
@@ -384,6 +385,26 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
       this.panel.hide().catch(() => {});
       hilog.info(0x0000, 'MeowpuutIME', 'keyboard hidden by candidate-bar pull-down');
     }
+  }
+
+  /**
+   * 【剪贴板 round 61】点击「粘贴」芯片：向聚焦编辑框发送 ExtendAction.PASTE
+   * （API 10+）。粘贴由编辑框/系统侧完成，输入法无需 READ_PASTEBOARD（该权限为
+   * system_basic ACL 受限权限，三方输入法申请会卡 AGC 签名）——这是官方推荐
+   * 的输入法剪贴板通路（@ohos.inputMethodEngine.d.ts sendExtendAction 文档）。
+   * 密码框等受限输入可能拒绝，sendExtendAction 失败仅记日志静默降级。
+   */
+  pasteFromClipboard(): void {
+    const client = this.inputClient;
+    if (client === null) {
+      hilog.warn(0x0000, 'MeowpuutIME', 'paste: no input client');
+      return;
+    }
+    client.sendExtendAction(inputMethodEngine.ExtendAction.PASTE).then(() => {
+      hilog.info(0x0000, 'MeowpuutIME', 'paste action accepted');
+    }).catch((e: BusinessError) => {
+      hilog.warn(0x0000, 'MeowpuutIME', `paste action failed: ${e.code} ${e.message}`);
+    });
   }
 
   /** 悬浮面板当前位置（拖动累计用）。 */

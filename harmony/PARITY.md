@@ -1383,3 +1383,33 @@ if (this.composer.composing && this.lastPreviewAt > 0 &&
 5. 全键盘下拉：手指从候选栏空白/猫身上/按键缝隙处下拉>56vp 键盘收起；
    从字符键/删除键/空格上下拉不收起；展开面板内滚动不误触。
 6. 质感：键帽有落影+顶部高光；地板渐变上平下深。深浅色各一张。
+
+
+## round 61：剪贴板（真机反馈「读不到剪切板的内容」）
+
+- 现象：键盘没有任何剪贴板功能；用户预期至少能粘贴。
+- 调研：`pasteboard.getData()` 需 `ohos.permission.READ_PASTEBOARD`——
+  system_basic + user_grant + ACL 受限权限（`PermissionDefinitions.json`），三方
+  输入法申请需 AGC 侧受限权限审批 + 签名 profile 含 `acls.requestPermissions`，
+  签名链路不在本项目掌控（会直接导致安装失败），不走此路。
+- 采用官方输入法通路：`InputClient.sendExtendAction(ExtendAction.PASTE)`
+  （`@ohos.inputMethodEngine.d.ts`，API 10+）——输入法把 PASTE 动作发给聚焦的
+  编辑框，粘贴由编辑框/系统侧完成，输入法零权限。文档注明：编辑框应用响应
+  PASTE 需自身具备 READ_PASTEBOARD（系统组件已具备）。
+- UI：预测行首位常驻「粘贴」芯片（CandidateItem kind=3，剪贴板小图标 +
+  「粘贴」文案，浅底胶囊与预测词同风格）；仅非组字态显示（组字时候选优先，
+  不掺入）。点击 → onPasteEvt → KeyboardCallbacks.onPaste →
+  `pasteFromClipboard()` → sendExtendAction(PASTE)，失败仅记 hilog 静默。
+- 新增：`Glyphs.clipboard`（板身+压夹+内容线描边图标）；hitCandidate 显式
+  设定 ctx.font（原先依赖绘制残留，芯片宽度公式与 drawRow 严格一致）。
+- 限制（记入验证预期）：粘贴动作由编辑框执行——支持程度取决于目标应用
+  （备忘录等 ArkUI 输入框原生支持；部分自绘输入/网页可能忽略）。密码框
+  系统侧会拒绝粘贴，属正常安全行为。
+
+### round 61 复验清单
+
+1. 备忘录输入一段文字 → 长按全选复制 → 清空 → 点开键盘：预测行第一位应出现
+   剪贴板图标 +「粘贴」芯片 → 点击 → 剪贴板内容出现在光标处。
+2. 组字中（拼音未上屏）芯片不显示；组字提交后回来。
+3. 网页输入框/搜索框粘贴一次，记录是否生效（应用差异，非 bug）。
+4. hilog grep MeowpuutIME：应见 `paste action accepted`。

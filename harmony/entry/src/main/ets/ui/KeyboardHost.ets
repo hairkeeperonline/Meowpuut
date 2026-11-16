@@ -60,6 +60,8 @@ export interface KeyboardCallbacks {
   onDragPanel(dx: number, dy: number): void;
   /** 【候选栏下拉】手指在候选栏下滑超过阈值时收起键盘（鸿蒙增强）。 */
   onHide(): void;
+  /** 【剪贴板 round 61】点击「粘贴」芯片：让聚焦编辑框执行系统粘贴。 */
+  onPaste(): void;
 }
 
 /** 键盘状态由 ability 写入，页面读取后渲染。 */

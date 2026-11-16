@@ -106,6 +106,9 @@ class AlternatesState {
   }
 }
 
+/** 【剪贴板芯片 round 61】预测行首位「粘贴」芯片的文案。 */
+const CLIPBOARD_PASTE_LABEL: string = '粘贴';
+
 class KeyboardTouchHost implements TouchHost {
   private kb: MeowpuutKeyboard;
   constructor(kb: MeowpuutKeyboard) { this.kb = kb; }
@@ -215,6 +218,8 @@ export struct MeowpuutKeyboard {
   onTickEvt?: () => void;
   onCandidateEvt?: (index: number) => void;
   onPredictionEvt?: (text: string) => void;
+  /** 【剪贴板 round 61】点击「粘贴」芯片：让编辑框执行系统粘贴。 */
+  onPasteEvt?: () => void;
   onPunctuationEvt?: (mark: string) => void;
   onToggleExpandedEvt?: () => void;
   onPetEvt?: (cat: string) => void;
@@ -1029,7 +1034,8 @@ export struct MeowpuutKeyboard {
     const gap = 6;
     const maxText = region.maximumCandidateWidth - 24;
     const ctx = this.barCtx;
-    // 与 drawRow 一致：宽度依赖实测文本尺寸。
+    // 与 drawRow 一致：宽度依赖实测文本尺寸（显式设定字体，不依赖上一帧残留）。
+    ctx.font = `${font}vp sans-serif`;
 
     let cx = row.left + 4 - this.barScroll;
     // items0 是候选行的项序号（与 drawRow 里 items 的下标一致，预测/标点接着排）。
@@ -1055,6 +1061,17 @@ export struct MeowpuutKeyboard {
         cx += width + gap;
       }
     } else if (st.predictions.length > 0) {
+      // 粘贴芯片（宽度公式与 drawRow 完全一致）。
+      const pasteIcon = font * 0.66;
+      const pasteW = Math.max(region.pillHeight,
+        ctx.measureText(CLIPBOARD_PASTE_LABEL).width + pasteIcon + 4 + 26);
+      if (hit(pasteW)) {
+        const index = items0;
+        this.flashPress(index, () => this.onPasteEvt?.());
+        return true;
+      }
+      items0++;
+      cx += pasteW + gap;
       for (let i = 0; i < st.predictions.length; i++) {
         const text = st.predictions[i];
         const width = Math.max(region.pillHeight, ctx.measureText(text).width + 22);
@@ -1432,6 +1449,14 @@ export struct MeowpuutKeyboard {
         x += width + gap;
       }
     } else if (st.predictions.length > 0) {
+      // 【剪贴板芯片 round 61】预测行首位常驻「粘贴」：点击经
+      // sendExtendAction(PASTE) 让聚焦编辑框自己执行系统粘贴 —— 输入法无需
+      // READ_PASTEBOARD（system_basic ACL 受限权限）即可用上剪贴板内容。
+      const pasteIcon = font * 0.66;
+      const pasteW = Math.max(region.pillHeight,
+        ctx.measureText(CLIPBOARD_PASTE_LABEL).width + pasteIcon + 4 + 26);
+      items.push(new CandidateItem(0, 3, CLIPBOARD_PASTE_LABEL, pasteW, false));
+      x += pasteW + gap;
       for (let i = 0; i < st.predictions.length; i++) {
         const text = st.predictions[i];
         const width = Math.max(region.pillHeight, ctx.measureText(text).width + 22);
@@ -1499,7 +1524,16 @@ export struct MeowpuutKeyboard {
       }
       const textW = ctx.measureText(item.text).width;
       const markW = item.japanese ? font * 0.45 + 3 : 0;
-      ctx.fillText(item.text, cx + (item.width - textW - markW) / 2, cy);
+      if (item.kind === 3) {
+        // 粘贴芯片：图标 + 文字成簇居中。
+        const iconSize = font * 0.66;
+        const clusterW = iconSize + 4 + textW;
+        const contentLeft = cx + (item.width - clusterW) / 2;
+        Glyphs.clipboard(ctx, contentLeft + iconSize / 2, cy, iconSize, look.candidateText);
+        ctx.fillText(item.text, contentLeft + iconSize + 4, cy);
+      } else {
+        ctx.fillText(item.text, cx + (item.width - textW - markW) / 2, cy);
+      }
       if (item.japanese) {
         const pawX = cx + (item.width - textW - markW) / 2 + textW + 3 + font * 0.225;
         Glyphs.paw(ctx, pawX, cy - font * 0.05, font * 0.45, selected ? '#D9FFFFFF' : look.candidateSecondary);
