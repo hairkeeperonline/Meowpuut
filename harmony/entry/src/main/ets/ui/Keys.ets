@@ -347,19 +347,25 @@ export class KeyBuilder {
       }
       rows.push(row);
     }
-    // 行 3: 标准底行（符号/切换/空格/换行）
+    // 行 3: 九键专属底行（真机反馈 round 60-2/6）：符号/空格/删除/换行 四键——
+    // 之前完全没有删除键（长按连删也无从谈起）；ABC/地球不放这行（走设置页）。
+    // 空格弹性撑满中间；长按删除键走既有 DeleteRepeat（420ms 后每 83ms 连删）。
     const symbolsKey = new Key(new KeyActionPage(1), t.pick('符號', '符号'), null, KeyStyle.UTILITY, [], false, true, 16, t.pick('符號', '符号'));
-    const bottom = KeyBuilder.bottomRow(context, t, symbolsKey, KeyBuilder.toggleKey(context));
+    const spaceKey = new Key(new KeyActionSpace(), context.spaceTitle, null, KeyStyle.CHARACTER, [], false, true, 16, '空格');
+    const returnKey = new Key(new KeyActionReturn(), context.returnTitle, null,
+      context.returnAccent ? KeyStyle.ACCENT : KeyStyle.UTILITY, [], false, context.returnEnabled, 16, context.returnTitle);
+    const bottomKeys: Key[] = [symbolsKey, spaceKey, KeyBuilder.deleteKey(t), returnKey];
+    const bottomSpec = new RowSpec([1.4, 0, 1.1, 1.5], RowAlignment.JUSTIFIED);
     const keyRows: Key[][] = [];
     keyRows.push(rows[0]);
     keyRows.push(rows[1]);
     keyRows.push(rows[2]);
-    keyRows.push(bottom.keys);
+    keyRows.push(bottomKeys);
     const specs: RowSpec[] = [];
     specs.push(new RowSpec(arrayOfFill(3, 1), RowAlignment.CENTERED));
     specs.push(new RowSpec(arrayOfFill(3, 1), RowAlignment.CENTERED));
     specs.push(new RowSpec(arrayOfFill(3, 1), RowAlignment.CENTERED));
-    specs.push(bottom.spec);
+    specs.push(bottomSpec);
     return new KeySet(keyRows, specs, 3);
   }
 

@@ -83,6 +83,8 @@ export class KeyTouches {
   private width: number = 0;
   private pointers: Map<number, Pointer> = new Map();
   private deleteRepeat: number = -1;
+  /** 连删链的世代号（startDelete 自增、stopDelete 失活、tick 闭包校验）。 */
+  private deleteRun: number = 0;
   private deleteCount: number = 0;
   private _cursorMode: boolean = false;
 
@@ -115,6 +117,18 @@ export class KeyTouches {
         }
       });
     }
+  }
+
+  /**
+   * 【下拉收起判定】当前是否有指针落在「按键」上（字符/删除/翻页等任意键）。
+   * 下拉手势只要不是从按键上发起（缝隙、边距、候选栏空白处）就允许收起键盘。
+   */
+  anyPointerOnKey(): boolean {
+    let on = false;
+    this.pointers.forEach((p: Pointer) => {
+      if (p.mode !== Mode.INERT && p.mode !== Mode.CURSOR) on = true;
+    });
+    return on;
   }
 
   isPressed(row: number, column: number): boolean {
@@ -401,27 +415,35 @@ export class KeyTouches {
   private startDelete(): void {
     this.stopDelete();
     this.deleteCount = 0;
-    const runId = this.host.post(DeleteRepeat.INITIAL_DELAY_MS, () => this.deleteTick(runId));
-    this.deleteRepeat = runId;
+    // 【真机反馈 round 60-6】世代计数器：旧实现把「定时器 id」当 runId 传进闭包，
+    // 第一次重发后 deleteRepeat 已指向新定时器，下一拍 tick 里
+    // `this.deleteRepeat !== runId` 恒成立直接 return —— 连删恰好只多触发一次
+    // 就断链。改用单调递增的 run 世代：整条链共享同一个 run，deleteRepeat
+    // 只用于 cancel 当前挂起的定时器，两者职责分离。
+    this.deleteRun++;
+    const run = this.deleteRun;
+    this.deleteRepeat = this.host.post(DeleteRepeat.INITIAL_DELAY_MS, () => this.deleteTick(run));
     this.listener?.onDelete(false);
   }
 
-  private deleteTick(runId: number): void {
-    if (this.deleteRepeat !== runId) return;
+  private deleteTick(run: number): void {
+    if (this.deleteRun !== run) return;
     this.deleteCount++;
     switch (DeleteRepeat.step(this.deleteCount)) {
       case DeleteStep.CHARACTER: this.listener?.onDelete(false); break;
       case DeleteStep.WORD: this.listener?.onDelete(true); break;
       default: break;
     }
-    if (this.deleteRepeat === runId) {
-      this.deleteRepeat = this.host.post(DeleteRepeat.INTERVAL_MS, () => this.deleteTick(runId));
+    if (this.deleteRun === run) {
+      this.deleteRepeat = this.host.post(DeleteRepeat.INTERVAL_MS, () => this.deleteTick(run));
     }
   }
 
   private stopDelete(): void {
     if (this.deleteRepeat >= 0) this.host.cancel(this.deleteRepeat);
     this.deleteRepeat = -1;
+    // 使任何在途闭包失活（cancel 掉的定时器若已入队也不再生效）。
+    this.deleteRun++;
   }
 
   activate(row: number, column: number): void {

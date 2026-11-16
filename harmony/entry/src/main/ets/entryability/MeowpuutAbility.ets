@@ -390,14 +390,27 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
   private floatX: number = 0;
   private floatY: number = 0;
 
+  /** 悬浮拖动把手高度（vp）。 */
+  private static readonly DRAG_HANDLE_VP = 32;
+
+  /**
+   * 悬浮态面板高度 = 键盘高度 + 拖动把手（真机反馈 round 60-3：悬浮时把手行
+   * 挤占键盘内容高度，「最底层被截断」）。把手渲染在 KeyboardPage 顶部 32vp。
+   */
+  private floatingPanelHeight(): number {
+    const disp: display.Display = display.getDefaultDisplaySync();
+    const density = disp.densityDPI / 160;
+    return this.lastPanelHeight + Math.round(MeowpuutAbility.DRAG_HANDLE_VP * density);
+  }
+
   /** 【悬浮键盘】拖动把手：增量移动面板（按面板真实宽高钳制，右/下缘不越屏）。 */
   dragPanel(dx: number, dy: number): void {
     if (this.panel === null || this.prefs.keyboardPosition !== 'floating') return;
     const disp: display.Display = display.getDefaultDisplaySync();
-    // 面板真实尺寸（悬浮宽度 = 屏宽-48，高度 = lastPanelHeight）。
+    // 面板真实尺寸（悬浮宽度 = 屏宽-48，高度 = 键盘高 + 把手高）。
     const panelW = Math.min(disp.width, Math.round(90 * (disp.densityDPI / 160)) > disp.width - 48
       ? disp.width : disp.width - 48);
-    const panelH = this.lastPanelHeight > 0 ? this.lastPanelHeight : 800;
+    const panelH = this.floatingPanelHeight();
     // 左边距和上边距最小 0；右边/下边不允许越出屏幕（显示不全修复）。
     const nx = Math.max(0, Math.min(disp.width - panelW, this.floatX + dx));
     const ny = Math.max(0, Math.min(disp.height - panelH, this.floatY + dy));
@@ -427,10 +440,11 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
         // 约 22% 屏高，四周都有可见留白，像一张浮在应用上的卡片。
         const margin = 24;
         const w = Math.max(90 * (disp.densityDPI / 160), disp.width - margin * 2);
-        await this.panel.resize(Math.round(w), this.lastPanelHeight);
+        const panelH = this.floatingPanelHeight();
+        await this.panel.resize(Math.round(w), panelH);
         const x = margin;
         // 初始位置：顶部 22% 屏高，但保证面板底部不越出屏幕（显示不全修复）。
-        const maxY = Math.max(margin, disp.height - this.lastPanelHeight - margin);
+        const maxY = Math.max(margin, disp.height - panelH - margin);
         const y = Math.min(Math.round(disp.height * 0.22), maxY);
         this.floatX = x;
         this.floatY = y;
@@ -439,9 +453,6 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
       } else {
         hilog.info(0x0000, 'MeowpuutIME', 'panel fixed (bottom)');
       }
-      // 位置切换影响底板透明度（悬浮半透明/贴底不透明），重算 Look 并重绘。
-      this.applyLook();
-      this.refreshKeyboard();
     } catch (e) {
       hilog.warn(0x0000, 'MeowpuutIME', `applyPanelPosition failed: ${JSON.stringify(e)}`);
     }
@@ -472,10 +483,12 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     const height: number = Math.round(dpHeight * density);
     this.lastPanelHeight = height;
     try {
-      // 悬浮态保持收窄的宽度（卡片边距），贴底态用全宽。
+      // 悬浮态保持收窄的宽度（卡片边距）+ 把手高度（否则把手挤掉底行）。
       const w = this.prefs.keyboardPosition === 'floating'
         ? Math.max(90 * density, width - 48) : width;
-      await this.panel.resize(w, height);
+      const h = this.prefs.keyboardPosition === 'floating'
+        ? this.floatingPanelHeight() : height;
+      await this.panel.resize(w, h);
       hilog.info(0x0000, 'MeowpuutIME',
         `panel resized ${width}x${height} dp=${dpHeight.toFixed(1)} (${rows}行, 候选栏${region.height.toFixed(1)})`);
     } catch (e) {
@@ -1176,7 +1189,7 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
       : null;
     this.look = new Look(dark, this.prefs.shape, this.prefs.palette, this.prefs.strength,
       this.prefs.cats, festivalPill, false, this.prefs.keyPopups, this.prefs.keyboardHeight,
-      this.prefs.effects, this.prefs.keyboardPosition === 'floating');
+      this.prefs.effects);
   }
 
   private readRawFileText(path: string): string {

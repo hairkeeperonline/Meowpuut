@@ -5,6 +5,7 @@
 import { MeowpuutKeyboard } from '../ui/MeowpuutKeyboard';
 import { KeyboardHost } from '../ui/KeyboardHost';
 import { Key } from '../ui/Keys';
+import { display } from '@kit.ArkUI';
 
 @Entry
 @Component
@@ -38,15 +39,16 @@ struct KeyboardPage {
               this.dragBaseY = 0;
             })
             .onActionUpdate((event: GestureEvent) => {
-              // offsetX/Y 是相对手势起点的总位移：把总位移作为一次增量提交
-              // （减去上一次已提交的基线），每帧都 moveTo —— 不做 24px 批量，
-              // 批量化会让面板一跳一跳不跟手（用户反馈「拖动不丝滑」）。
+              // offsetX/Y 是相对手势起点的总位移（vp）：取与上次提交基线的差作为
+              // 本帧增量，乘 density 换算成 px 再提交 —— panel.moveTo 单位是 px，
+              // 不换算的话面板只跟 1/3 速度（真机反馈 round 60-3「很慢不跟手」）。
               const dx = event.offsetX - this.dragBaseX;
               const dy = event.offsetY - this.dragBaseY;
               if (dx !== 0 || dy !== 0) {
                 this.dragBaseX = event.offsetX;
                 this.dragBaseY = event.offsetY;
-                this.host.callbacks?.onDragPanel(Math.round(dx), Math.round(dy));
+                const density = display.getDefaultDisplaySync().densityDPI / 160;
+                this.host.callbacks?.onDragPanel(Math.round(dx * density), Math.round(dy * density));
               }
             })
         )

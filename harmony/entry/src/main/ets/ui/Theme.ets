@@ -54,13 +54,9 @@ export class Look {
   readonly keyboardHeight: string;
   /** 视觉特效档位（对应 Android effects：lightweight/standard/extreme）。 */
   readonly effects: string;
-  /** 悬浮键盘态：底板半透明（键区+候选区透出底层应用，鸿蒙增强）。 */
-  readonly translucentPanel: boolean;
-
   constructor(dark: boolean, shape: GlassShape, palette: Palette, strength: GlassStrength, cats: boolean,
     pillOverride: string | null = null, opaque: boolean = false, keyPopups: boolean = true,
-    keyboardHeight: string = 'standard', effects: string = 'standard',
-    translucentPanel: boolean = false) {
+    keyboardHeight: string = 'standard', effects: string = 'standard') {
     this.dark = dark;
     this.shape = shape;
     this.palette = palette;
@@ -71,7 +67,6 @@ export class Look {
     this.keyPopups = keyPopups;
     this.keyboardHeight = keyboardHeight;
     this.effects = effects;
-    this.translucentPanel = translucentPanel;
   }
 
   /** 键盘高度缩放系数（short=0.88 / standard=1.0 / tall=1.12）。 */
@@ -92,18 +87,8 @@ export class Look {
     return this.effects === 'lightweight' ? 140 : 320;
   }
 
-  /** 底板色：悬浮态半透明（透出底层应用），贴底态不透明（对齐 Android）。 */
-  get keyboardTop(): string {
-    return this.translucentPanel
-      ? (this.dark ? '#E6252428' : '#E6E9E8EF')
-      : (this.dark ? '#FF252428' : '#FFE9E8EF');
-  }
-
-  get keyboardBottom(): string {
-    return this.translucentPanel
-      ? (this.dark ? '#E61A191C' : '#E6D9D8E0')
-      : (this.dark ? '#FF1A191C' : '#FFD9D8E0');
-  }
+  get keyboardTop(): string { return this.dark ? '#FF252428' : '#FFE9E8EF'; }
+  get keyboardBottom(): string { return this.dark ? '#FF1A191C' : '#FFD9D8E0'; }
   get keyFaceTop(): string { return this.dark ? '#FF636268' : '#FFFFFFFF'; }
   get keyFaceBottom(): string { return this.dark ? '#FF5A595F' : '#FFFAFAFC'; }
   get keyUtility(): string { return this.dark ? '#FF3C3B40' : '#FFCFCED8'; }

@@ -396,7 +396,13 @@ export class AlternatesStrip {
     const width = cell * options + 2 * AlternatesStrip.PADDING;
     const leftHalf = boxCenterX(key) < keyboardWidth / 2;
     const x = Math.min(Math.max(2, leftHalf ? key.left - 4 : boxRight(key) + 4 - width), keyboardWidth - 2 - width);
-    return new AlternatesStrip(new Box(x, key.top - 50 - 4, width, 50), cell, options, !leftHalf);
+    // 【真机反馈 round 60-2】第 0 行（九键「1」/符号页首行）长按时 strip 按键上方
+    // 排布会超出键区 Canvas（y<0）被裁掉，观感即「长按后看不到」。顶行的
+    // strip 翻到按键下方绘制（盖住第二行），永远留在 Canvas 内。
+    const STRIP_H = 50;
+    const aboveTop = key.top - STRIP_H - 4;
+    const y = aboveTop >= 4 ? aboveTop : key.bottom + 4;
+    return new AlternatesStrip(new Box(x, y, width, STRIP_H), cell, options, !leftHalf);
   }
 }
 
@@ -407,6 +413,9 @@ export class KeyBalloon {
     const height = idiom === Idiom.PHONE_LANDSCAPE ? 40 : 54;
     const width = Math.min(keyboardWidth - 4, key.width + 2 * flare);
     const x = Math.min(Math.max(2, boxCenterX(key) - width / 2), keyboardWidth - 2 - width);
-    return new Box(x, key.top - height + 2, width, height);
+    // 顶行按键的气泡同样翻到下方绘制（strip 同理：避免超出键区 Canvas 被裁）。
+    const aboveTop = key.top - height + 2;
+    const y = aboveTop >= 2 ? aboveTop : key.bottom - 2;
+    return new Box(x, y, width, height);
   }
 }

@@ -280,6 +280,8 @@ export struct MeowpuutKeyboard {
   private barDragId: number = -1;
   private barDownX: number = 0;
   private barDownY: number = 0;
+  /** 【全键盘下拉收起】本手势周期内是否已触发收起（去抖，一次手势只收一次）。 */
+  private pullDownFired: boolean = false;
   private barDownScroll: number = 0;
   private barDragging: boolean = false;
   private barVel: number = 0;
@@ -801,6 +803,23 @@ export struct MeowpuutKeyboard {
     // 验证，见 PARITY.md。
     .accessibilityGroup(true)
     .accessibilityText('喵扑输入键盘')
+    // 【全键盘下拉收起】（真机反馈 round 60-5）：手指没按在按键上时，竖向
+    // 下拉超过 56vp 即收起键盘 —— 不再局限于候选栏（原来区域小很难选中）。
+    // 起点在按键上（含字符键、删除、空格等）不触发；展开面板滚动态不触发。
+    .gesture(
+      PanGesture({ fingers: 1, distance: 8, direction: PanDirection.Vertical })
+        .onActionStart(() => {
+          this.pullDownFired = false;
+        })
+        .onActionUpdate((event: GestureEvent) => {
+          if (this.pullDownFired || this.state.expanded) return;
+          if (this.touches !== null && this.touches.anyPointerOnKey()) return;
+          if (event.offsetY > 56) {
+            this.pullDownFired = true;
+            this.onHideEvt?.();
+          }
+        })
+    )
     // 底色取渐变终点，避免和 Canvas 的键盘背景渐变叠成一层平色。
     .onAreaChange((oldArea: Area, newArea: Area) => {
       const w = newArea.width as number;
@@ -1071,23 +1090,9 @@ export struct MeowpuutKeyboard {
     const region = new CandidateRegionLayout(w, this.idiom, look.cats);
     const h = region.height;
     ctx.clearRect(0, 0, w, h);
-    // 键盘整体背景（对应 Android KeyboardView.onDraw 的 keyboardTop→Bottom 渐变）。
-    // 候选区在键盘最顶部，此处渐变起点就是 keyboardTop，短距离内近似纯色；
-    // 键区 Canvas 在下方继续画同一渐变（drawKeys），二者拼成完整键盘背景。
-    ctx.fillStyle = look.keyboardTop;
-    // 顶部同样应用造型轮廓（胶囊平直/波浪/云朵），与键区地板连成整块玻璃底板。
-    const shapeH2 = Math.min(h, 40);
-    ctx.beginPath();
-    ctx.moveTo(0, h);
-    ctx.lineTo(0, shapeH2);
-    const steps2 = 48;
-    for (let i = 0; i <= steps2; i++) {
-      const x = w * i / steps2;
-      ctx.lineTo(x, glassTop(look.shape, x, w, shapeH2));
-    }
-    ctx.lineTo(w, h);
-    ctx.closePath();
-    ctx.fill();
+    // 【真机反馈 round 60-4】字母/候选/猫咪区域背景透明：候选栏不再铺键盘底色，
+    // 玻璃带与猫直接浮在输入法面板上、透出底层应用（不随深浅色变化）。
+    // 键区地板渐变仍在 drawKeys 里绘制（造型轮廓在那边）。
 
     // 玻璃。
     GlassPainter.shadow(ctx, look.shape, region.glass, look.dark);
@@ -1612,11 +1617,14 @@ export struct MeowpuutKeyboard {
     if (keySet === null) return;
     const total = this.keysAreaHeight();
 
-    // 背景渐变：上浅下深（对应 Android KeyboardView.kt:158 的 LinearGradient）。
+    // 背景渐变（对应 Android KeyboardView.kt:158 的 LinearGradient）：
+    // 【质感 round 60-8】三段式——上 30% 保持顶色再向底色加深，比直线渐变
+    // 更有「整块材料」的厚重感。
     // 底板应用玻璃造型（用户反馈「地板没有应用玻璃形态」）：上沿按
     // 造型起伏（胶囊平直圆角/波浪 S 形/云朵鼓包），其余三边贴面板边缘。
     const bg = ctx.createLinearGradient(0, 0, 0, total);
     bg.addColorStop(0, look.keyboardTop);
+    bg.addColorStop(0.3, look.keyboardTop);
     bg.addColorStop(1, look.keyboardBottom);
     ctx.fillStyle = bg;
     const shapeH = Math.min(total, 56);
@@ -1947,16 +1955,40 @@ export struct MeowpuutKeyboard {
       : look.shape === GlassShape.CLOUD
         ? Math.min(frame.height / 2, m.cornerRadius * 1.18)
         : m.cornerRadius;
-    // 底部 1dp 实心底边（对照 Android KeysView.kt:127-129 的 crisp bottom edge）。
+    // 底部 1dp 实心底边（对照 Android KeysView.kt:127-129 的 crisp bottom edge）
+    // + 【质感 round 60-8】键帽软投影：一次 roundRect 同时得到硬底边与向下的
+    // 柔和落影（浅色紫灰 0.10 / 深色黑 0.22，blur 3、下偏 1.5），键区有立体层次。
+    ctx.save();
+    ctx.shadowBlur = 3;
+    ctx.shadowOffsetY = 1.5;
+    ctx.shadowColor = look.dark ? 'rgba(0,0,0,0.22)' : 'rgba(61,41,69,0.10)';
     ctx.fillStyle = look.keyShadow;
     roundRect(ctx, frame.left, frame.top + 1, frame.width, frame.height, shapeR);
     ctx.fill();
+    ctx.restore();
     // 键面。空格移光标时键面半透明、标签隐藏（对照 Android KeysView.kt:138,146）。
     if (cursorMode) ctx.globalAlpha = 170 / 255;
     ctx.fillStyle = fill;
     roundRect(ctx, frame.left, frame.top, frame.width, frame.height, shapeR);
     ctx.fill();
     if (cursorMode) ctx.globalAlpha = 1;
+
+    // 【质感 round 60-8】键帽上缘高光：1.2dp 内嵌描边，顶部亮、往下渐隐
+    // （浅色 0.34 / 深色 0.14），像键帽顶部受光。按下态不画（按下整体变暗）。
+    if (!pressed) {
+      ctx.save();
+      roundRect(ctx, frame.left, frame.top, frame.width, frame.height, shapeR);
+      ctx.clip();
+      const rimGrad = ctx.createLinearGradient(0, frame.top, 0, frame.top + frame.height * 0.5);
+      rimGrad.addColorStop(0, withAlpha('#FFFFFFFF', look.dark ? 0.14 : 0.34));
+      rimGrad.addColorStop(1, withAlpha('#FFFFFFFF', 0));
+      ctx.strokeStyle = rimGrad;
+      ctx.lineWidth = 1.2;
+      roundRect(ctx, frame.left + 0.6, frame.top + 0.6, frame.width - 1.2, frame.height - 1.2,
+        Math.max(1, shapeR - 0.8));
+      ctx.stroke();
+      ctx.restore();
+    }
 
     // 标签（光标模式下隐藏，让用户知道当前在移光标而非打字）。
     if (cursorMode) return;

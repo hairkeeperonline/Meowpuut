@@ -100,6 +100,31 @@ struct SettingsPage {
     });
     this.loadPreviewCats();
     this.updateStatus();
+    // 【真机反馈 round 60-1】系统切换输入法（如切到小艺）后状态行仍显示
+    // 「当前使用的键盘是喵扑」——updateStatus 原来只在 aboutToAppear 跑一次。
+    // 修复：订阅系统 imeChange 事件 + 页面回前台（onPageShow）时重查。
+    try {
+      inputMethod.getInputMethodSetting().on('imeChange', this.imeChangeCb);
+    } catch (e) {
+      // 低版本无事件时依赖 onPageShow 刷新兜底。
+    }
+  }
+
+  /** imeChange 回调：实例箭头函数保持稳定引用（off 时要用同一个函数）。 */
+  private imeChangeCb: () => void = (): void => {
+    this.updateStatus();
+  };
+
+  onPageShow(): void {
+    this.updateStatus();
+  }
+
+  aboutToDisappear(): void {
+    try {
+      inputMethod.getInputMethodSetting().off('imeChange', this.imeChangeCb);
+    } catch (e) {
+      // 未订阅成功时 off 抛错可忽略。
+    }
   }
 
   /** 解码候选栏预览的两只猫贴图（米米莫黑猫 + 莫莫暹罗猫，均 edge_peek 探头姿态）。 */
