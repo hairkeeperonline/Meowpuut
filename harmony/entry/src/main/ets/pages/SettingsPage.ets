@@ -14,6 +14,7 @@ import { Palette, Tone, GlassStrength, Look } from '../ui/Theme';
 import { GlassShape, traceOutline } from '../ui/GlassOutline';
 import { Box } from '../ui/Geometry';
 import { display } from '@kit.ArkUI';
+import mediaquery from '@ohos.mediaquery';
 
 /** 输入法启用状态（对照 Android SettingsActivity.updateStatus）。 */
 enum ImeStatus {
@@ -49,6 +50,12 @@ struct SettingsPage {
   @State private rightCat: image.PixelMap | undefined = undefined;
   /** 输入法启用状态（对照 Android 的 setup_off/enabled/selected）。 */
   @State private imeStatus: ImeStatus = ImeStatus.OFF;
+  /** 【UX round 63】系统深色模式：页面配色跟随，预览「跟随系统」色调也用它判断。 */
+  @State private isDark: boolean = false;
+  private darkQuery: mediaquery.MediaQueryListener | null = null;
+  private darkCb: (r: mediaquery.MediaQueryResult) => void = (r: mediaquery.MediaQueryResult): void => {
+    this.isDark = r.matches;
+  };
   /** 第三方授权弹窗控制器（懒创建，内容在打开时读取）。 */
   private licenseDialog: CustomDialogController | null = null;
 
@@ -73,6 +80,9 @@ struct SettingsPage {
   }
 
   aboutToAppear(): void {
+    this.darkQuery = mediaquery.matchMediaSync('(prefers-color-mode: dark)');
+    this.isDark = this.darkQuery.matches;
+    this.darkQuery.on('change', this.darkCb);
     this.headerMaterial = SettingsPage.makeMaterial();
     const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
     this.prefs.init(ctx).then(() => {
@@ -120,6 +130,7 @@ struct SettingsPage {
   }
 
   aboutToDisappear(): void {
+    this.darkQuery?.off('change', this.darkCb);
     try {
       inputMethod.getInputMethodSetting().off('imeChange', this.imeChangeCb);
     } catch (e) {
@@ -151,8 +162,21 @@ struct SettingsPage {
 
   /** 候选词选中态高亮 pill 色（对应 Android 的深酒红 accent）。 */
   private accent(): string {
-    const look = new Look(this.tone === Tone.DARK, this.shape, this.palette, this.strength, this.cats);
+    const look = new Look(this.previewDark(), this.shape, this.palette, this.strength, this.cats);
     return look.accent;
+  }
+
+  /** 【UX round 63】页面配色跟随系统深浅色（与键盘深色一族同源）。 */
+  private pageBg(): string { return this.isDark ? '#FF1C1B1F' : this.pageBg(); }
+  private cardBg(): string { return this.isDark ? '#FF26252A' : this.cardBg(); }
+  private secondaryText(): string { return this.isDark ? '#FF9C9CA4' : this.secondaryText(); }
+  private disabledText(): string { return this.isDark ? '#FF5A595F' : this.disabledText(); }
+  private dividerColor(): string { return this.isDark ? '#FF38373D' : this.trackColor(); }
+  private trackColor(): string { return this.isDark ? '#FF444349' : this.trackColor(); }
+  private textPrimary(): string { return this.isDark ? '#FFF2EFF0' : this.textPrimary(); }
+  /** 预览深浅：色调选深色、或跟随系统且系统当前为深色。 */
+  private previewDark(): boolean {
+    return this.tone === Tone.DARK || (this.tone === Tone.SYSTEM && this.isDark);
   }
 
   /**
@@ -216,7 +240,7 @@ struct SettingsPage {
   sectionTitle(text: string) {
     Text(text)
       .fontSize(14)
-      .fontColor('#8A8A8E')
+      .fontColor(this.secondaryText())
       .margin({ top: 20, bottom: 8, left: 4 })
   }
 
@@ -224,7 +248,7 @@ struct SettingsPage {
   note(text: string) {
     Text(text)
       .fontSize(12)
-      .fontColor('#8A8A8E')
+      .fontColor(this.secondaryText())
       .opacity(0.7)
       .width('100%')
       .margin({ top: 4, bottom: 6, left: 4 })
@@ -235,11 +259,12 @@ struct SettingsPage {
     Row() {
       Text(label).fontSize(16).layoutWeight(1)
       Toggle({ type: ToggleType.Switch, isOn: checked })
+        .selectedColor(this.accent())
         .onChange((v: boolean) => onChange(v))
     }
     .width('100%')
     .padding({ left: 16, right: 16, top: 12, bottom: 12 })
-    .backgroundColor('#FFFFFF')
+    .backgroundColor(this.cardBg())
     .borderRadius(12)
     .margin({ bottom: 8 })
   }
@@ -257,6 +282,9 @@ struct SettingsPage {
     }
     .width('100%')
     .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+    .backgroundColor(this.cardBg())
+    .borderRadius(12)
+    .margin({ bottom: 8 })
   }
 
   /** 把字符串数组转成 SelectOption[]，显式类型避免 arkts-no-untyped-obj-literals。 */
@@ -268,48 +296,28 @@ struct SettingsPage {
     return out;
   }
 
-  /** 滑块行（label + 当前值 + Slider），对应 Android 的振动强度/音效音量。enabled=false 时置灰禁用。 */
-  @Builder
-  rowSlider(label: string, valueText: string, value: number, min: number, max: number,
-    onChange: (v: number) => void, enabled: boolean = true) {
-    Column() {
-      Row() {
-        Text(label).fontSize(16).layoutWeight(1)
-        Text(valueText).fontSize(15).fontColor(enabled ? '#8A8A8E' : '#C7C7CC')
-      }
-      .width('100%')
-      Slider({ value: value, min: min, max: max, step: 1 })
-        .width('100%')
-        .margin({ top: 8 })
-        .enabled(enabled)
-        .selectedColor(enabled ? '#FF0A59F7' : '#FFC7C7CC')
-        .trackColor(enabled ? '#FFE5E5EA' : '#FFE5E5EA')
-        .blockColor(enabled ? '#FFFFFFFF' : '#FFC7C7CC')
-        .onChange((v: number) => onChange(v))
-    }
-    .width('100%')
-    .padding({ left: 16, right: 16, top: 12, bottom: 12 })
-  }
-
   /** 禁用的滑块行（label + 当前值 + 灰色禁用 Slider），对应 Android 的自定义音效音量 SeekBar（enabled=false 占位）。 */
   @Builder
   rowSliderDisabled(label: string, valueText: string, value: number, min: number, max: number) {
     Column() {
       Row() {
         Text(label).fontSize(16).layoutWeight(1)
-        Text(valueText).fontSize(15).fontColor('#8A8A8E')
+        Text(valueText).fontSize(15).fontColor(this.secondaryText())
       }
       .width('100%')
       Slider({ value: value, min: min, max: max, step: 1 })
         .width('100%')
         .margin({ top: 8 })
         .enabled(false)
-        .selectedColor('#FFC7C7CC')
-        .trackColor('#FFE5E5EA')
-        .blockColor('#FFC7C7CC')
+        .selectedColor(this.disabledText())
+        .trackColor(this.trackColor())
+        .blockColor(this.disabledText())
     }
     .width('100%')
     .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+    .backgroundColor(this.cardBg())
+    .borderRadius(12)
+    .margin({ bottom: 8 })
   }
 
   /** 振动强度行（内联引用 @State，振动开关关闭时滑块置灰禁用，对应 Android 联动）。 */
@@ -320,7 +328,7 @@ struct SettingsPage {
         Text('振动强度').fontSize(16).layoutWeight(1)
         Text(this.hapticStrength === 'light' ? '轻柔' : this.hapticStrength === 'strong' ? '强' : '标准')
           .fontSize(15)
-          .fontColor(this.haptics ? '#8A8A8E' : '#C7C7CC')
+          .fontColor(this.haptics ? this.secondaryText() : this.disabledText())
       }
       .width('100%')
       Slider({ value: this.hapticStrength === 'light' ? 0 : this.hapticStrength === 'strong' ? 2 : 1,
@@ -328,9 +336,9 @@ struct SettingsPage {
         .width('100%')
         .margin({ top: 8 })
         .enabled(this.haptics)
-        .selectedColor(this.haptics ? '#FF0A59F7' : '#FFC7C7CC')
-        .trackColor('#FFE5E5EA')
-        .blockColor(this.haptics ? '#FFFFFFFF' : '#FFC7C7CC')
+        .selectedColor(this.haptics ? this.accent() : this.disabledText())
+        .trackColor(this.trackColor())
+        .blockColor(this.haptics ? '#FFFFFFFF' : this.disabledText())
         .onChange((v: number) => {
           this.hapticStrength = v === 0 ? 'light' : v === 2 ? 'strong' : 'medium';
           this.prefs.hapticStrength = this.hapticStrength;
@@ -338,6 +346,9 @@ struct SettingsPage {
     }
     .width('100%')
     .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+    .backgroundColor(this.cardBg())
+    .borderRadius(12)
+    .margin({ bottom: 8 })
   }
 
 /** 候选栏预览（对应 Android BarPreview）：两只猫扒在候选栏两端 + 示例候选词，随配色/造型实时刷新。 */
@@ -356,7 +367,7 @@ struct SettingsPage {
           // 玻璃轮廓：胶囊=直边圆角、波浪=正弦丝带、云朵=云朵形（对照 Android GlassOutline）。
           Polygon({ width: this.barInnerSize()[0], height: this.barInnerSize()[1] })
             .points(this.barGlassPoints(this.barInnerSize()[0], this.barInnerSize()[1]))
-            .fill('#FFF4F4F6')
+            .fill(this.previewDark() ? '#FF3A393E' : '#FFF4F4F6')
           Row({ space: 8 }) {
             // 选中态：accent 高亮 pill + 白字。
             Text('你好')
@@ -369,10 +380,10 @@ struct SettingsPage {
             // 第二个候选随简繁切换：简体「您好」/ 繁体「妳好」（对照 Android samples）。
             Text(this.simplified ? '您好' : '妳好')
               .fontSize(16)
-              .fontColor('#FF171415')
+              .fontColor(this.textPrimary())
             Text('你好呀')
               .fontSize(16)
-              .fontColor('#FF171415')
+              .fontColor(this.textPrimary())
           }
           .padding({ left: 10, right: 10 })
         }
@@ -386,7 +397,7 @@ struct SettingsPage {
             .objectFit(ImageFit.Contain)
           Text('⌄')
             .fontSize(16)
-            .fontColor('#FF171415')
+            .fontColor(this.textPrimary())
             .margin({ top: 0 })
         }
         .alignItems(HorizontalAlign.Center)
@@ -394,7 +405,7 @@ struct SettingsPage {
       .width('100%')
       .alignItems(VerticalAlign.Center)
       .padding({ left: 8, right: 8, top: 6, bottom: 6 })
-      .backgroundColor('#FFEEF0F2')
+      .backgroundColor(this.previewDark() ? '#FF26252A' : '#FFEEF0F2')
       .borderRadius(18)
     }
     .width('100%')
@@ -418,7 +429,7 @@ struct SettingsPage {
             // 状态行（对照 Android 的 updateStatus）。
             Text(this.statusText())
               .fontSize(14)
-              .fontColor(this.imeStatus === ImeStatus.SELECTED ? '#34C759' : '#8A8A8E')
+              .fontColor(this.imeStatus === ImeStatus.SELECTED ? '#34C759' : this.secondaryText())
               .width('100%')
               .margin({ top: 12 })
             // 单个按钮：打开系统设置的输入法管理页（系统页里可直接切换键盘）。
@@ -426,6 +437,7 @@ struct SettingsPage {
               Button('打开键盘设置')
                 .layoutWeight(1)
                 .height(44)
+                .backgroundColor(this.accent())
                 .onClick(() => {
                   const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
                   // uri "set_input" 是系统设置的输入法切换页入口。
@@ -447,7 +459,7 @@ struct SettingsPage {
           }
           .width('100%')
           .padding(16)
-          .backgroundColor('#FFFFFF')
+          .backgroundColor(this.cardBg())
           .borderRadius(12)
 
           this.sectionTitle('输入')
@@ -488,7 +500,7 @@ struct SettingsPage {
             .padding({ left: 16, right: 16, top: 12, bottom: 12 })
           }
           .width('100%')
-          .backgroundColor('#FFFFFF')
+          .backgroundColor(this.cardBg())
           .borderRadius(12)
           .margin({ bottom: 8 })
 
@@ -505,6 +517,10 @@ struct SettingsPage {
           TextArea({ placeholder: '在这里试打' })
             .width('100%')
             .height(96)
+            .backgroundColor(this.cardBg())
+            .borderRadius(12)
+            .padding(12)
+            .fontColor(this.textPrimary())
 
           this.sectionTitle('外观')
 
@@ -518,14 +534,14 @@ struct SettingsPage {
             Row() {
               Text('视觉特效').fontSize(16).layoutWeight(1)
               Text(this.effects === 'lightweight' ? '轻量' : this.effects === 'extreme' ? '极致' : '标准')
-                .fontSize(15).fontColor('#8A8A8E')
+                .fontSize(15).fontColor(this.secondaryText())
             }
             .width('100%')
             Slider({ value: this.effects === 'lightweight' ? 0 : this.effects === 'extreme' ? 2 : 1, min: 0, max: 2, step: 1 })
               .width('100%')
               .margin({ top: 8 })
-              .selectedColor('#FF0A59F7')
-              .trackColor('#FFE5E5EA')
+              .selectedColor(this.accent())
+              .trackColor(this.trackColor())
               .blockColor('#FFFFFFFF')
               .onChange((v: number) => {
                 this.effects = v === 0 ? 'lightweight' : v === 2 ? 'extreme' : 'standard';
@@ -534,6 +550,9 @@ struct SettingsPage {
           }
           .width('100%')
           .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+          .backgroundColor(this.cardBg())
+          .borderRadius(12)
+          .margin({ bottom: 8 })
           this.note('轻量减少动效。极致让候选栏、键帽和底板更通透。')
 
           this.rowSelect('键盘高度',
@@ -568,7 +587,7 @@ struct SettingsPage {
             .width('100%')
             .padding({ left: 16, right: 16, top: 12, bottom: 12 })
 
-            Divider().color('#E5E5EA').margin({ left: 16 })
+            Divider().color(this.dividerColor()).margin({ left: 16 })
 
             Row() {
               Text('色调').fontSize(16).layoutWeight(1)
@@ -583,7 +602,7 @@ struct SettingsPage {
             .width('100%')
             .padding({ left: 16, right: 16, top: 12, bottom: 12 })
 
-            Divider().color('#E5E5EA').margin({ left: 16 })
+            Divider().color(this.dividerColor()).margin({ left: 16 })
 
             Row() {
               Text('色系').fontSize(16).layoutWeight(1)
@@ -605,7 +624,7 @@ struct SettingsPage {
             .width('100%')
             .padding({ left: 16, right: 16, top: 12, bottom: 12 })
 
-            Divider().color('#E5E5EA').margin({ left: 16 })
+            Divider().color(this.dividerColor()).margin({ left: 16 })
 
             Row() {
               Text('玻璃强度').fontSize(16).layoutWeight(1)
@@ -624,8 +643,9 @@ struct SettingsPage {
             .padding({ left: 16, right: 16, top: 12, bottom: 12 })
           }
           .width('100%')
-          .backgroundColor('#FFFFFF')
+          .backgroundColor(this.cardBg())
           .borderRadius(12)
+          .margin({ bottom: 8 })
 
           this.rowCheck('米米莫与莫莫', this.cats, (v: boolean) => {
             this.cats = v;
@@ -682,7 +702,7 @@ struct SettingsPage {
       }
       .width('100%')
       .height('100%')
-      .backgroundColor('#F2F2F7')
+      .backgroundColor(this.pageBg())
     }
     .title('喵扑 Meowpuut', {
       // 沉浸式材质：标题栏像悬浮玻璃，内容滚过时透出真实模糊。

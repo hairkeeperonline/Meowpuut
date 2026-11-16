@@ -1940,11 +1940,16 @@ export struct MeowpuutKeyboard {
     }
 
     if (this.state.candidates.length === 0) {
-      ctx.fillStyle = look.candidateSecondary;
-      ctx.font = '18vp sans-serif';
+      // 【UX round 63】空状态：淡爪印 + 主文案，比一行灰字更有温度。
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(this.state.keyCtx.simplified ? '暂无候选' : '暫無候選', w / 2, h / 2);
+      ctx.save();
+      ctx.globalAlpha = 0.45;
+      Glyphs.paw(ctx, w / 2, h / 2 - 24, 22, look.candidateSecondary);
+      ctx.restore();
+      ctx.fillStyle = look.candidateSecondary;
+      ctx.font = '16vp sans-serif';
+      ctx.fillText(this.state.keyCtx.simplified ? '暂无候选' : '暫無候選', w / 2, h / 2 + 10);
     }
     ctx.restore();
   }
@@ -1973,10 +1978,19 @@ export struct MeowpuutKeyboard {
         fillTop = fillBottom = look.keyCharacterPressed;
       }
     }
+    // 【UX round 63】按下微缩：没有气泡反馈的键（功能键/无预览字符键/平板）按下时
+    // 键帽向中心收缩 2%/3%，与加深色叠加出「按下去」的触觉感；
+    // 命中区与气泡仍锚定原 frame，不受影响。
+    let f = frame;
+    if (pressed && (!key.preview || this.idiom === Idiom.TABLET)) {
+      const dx = frame.width * 0.02;
+      const dy = frame.height * 0.03;
+      f = new Box(frame.left + dx, frame.top + dy, frame.width - dx * 2, frame.height - dy * 2);
+    }
     // 键面自上而下的柔和明暗过渡（对应 Android KeysView.kt:117 的 LinearGradient）。
     let fill: string | CanvasGradient = fillTop;
     if (fillTop !== fillBottom) {
-      const grad = ctx.createLinearGradient(0, frame.top, 0, frame.top + frame.height);
+      const grad = ctx.createLinearGradient(0, f.top, 0, f.top + f.height);
       grad.addColorStop(0, fillTop);
       grad.addColorStop(1, fillBottom);
       fill = grad;
@@ -1985,9 +1999,9 @@ export struct MeowpuutKeyboard {
     // 键帽玻璃形态（用户反馈「键帽没有应用玻璃形态」）：圆角随造型变化——
     // 胶囊=默认小圆角，波浪=更圆的胶囊，云朵=中等圆角（不对称鼓包对单键太碎）。
     const shapeR = look.shape === GlassShape.WAVE
-      ? Math.min(frame.height / 2, m.cornerRadius * 1.35)
+      ? Math.min(f.height / 2, m.cornerRadius * 1.35)
       : look.shape === GlassShape.CLOUD
-        ? Math.min(frame.height / 2, m.cornerRadius * 1.18)
+        ? Math.min(f.height / 2, m.cornerRadius * 1.18)
         : m.cornerRadius;
     // 底部 1dp 实心底边（对照 Android KeysView.kt:127-129 的 crisp bottom edge）
     // + 【质感 round 60-8】键帽软投影：一次 roundRect 同时得到硬底边与向下的
@@ -1997,13 +2011,13 @@ export struct MeowpuutKeyboard {
     ctx.shadowOffsetY = 1.5;
     ctx.shadowColor = look.dark ? 'rgba(0,0,0,0.22)' : 'rgba(61,41,69,0.10)';
     ctx.fillStyle = look.keyShadow;
-    roundRect(ctx, frame.left, frame.top + 1, frame.width, frame.height, shapeR);
+    roundRect(ctx, f.left, f.top + 1, f.width, f.height, shapeR);
     ctx.fill();
     ctx.restore();
     // 键面。空格移光标时键面半透明、标签隐藏（对照 Android KeysView.kt:138,146）。
     if (cursorMode) ctx.globalAlpha = 170 / 255;
     ctx.fillStyle = fill;
-    roundRect(ctx, frame.left, frame.top, frame.width, frame.height, shapeR);
+    roundRect(ctx, f.left, f.top, f.width, f.height, shapeR);
     ctx.fill();
     if (cursorMode) ctx.globalAlpha = 1;
 
@@ -2011,14 +2025,14 @@ export struct MeowpuutKeyboard {
     // （浅色 0.34 / 深色 0.14），像键帽顶部受光。按下态不画（按下整体变暗）。
     if (!pressed) {
       ctx.save();
-      roundRect(ctx, frame.left, frame.top, frame.width, frame.height, shapeR);
+      roundRect(ctx, f.left, f.top, f.width, f.height, shapeR);
       ctx.clip();
-      const rimGrad = ctx.createLinearGradient(0, frame.top, 0, frame.top + frame.height * 0.5);
+      const rimGrad = ctx.createLinearGradient(0, f.top, 0, f.top + f.height * 0.5);
       rimGrad.addColorStop(0, withAlpha('#FFFFFFFF', look.dark ? 0.14 : 0.34));
       rimGrad.addColorStop(1, withAlpha('#FFFFFFFF', 0));
       ctx.strokeStyle = rimGrad;
       ctx.lineWidth = 1.2;
-      roundRect(ctx, frame.left + 0.6, frame.top + 0.6, frame.width - 1.2, frame.height - 1.2,
+      roundRect(ctx, f.left + 0.6, f.top + 0.6, f.width - 1.2, f.height - 1.2,
         Math.max(1, shapeR - 0.8));
       ctx.stroke();
       ctx.restore();
@@ -2038,15 +2052,15 @@ export struct MeowpuutKeyboard {
     const labelColor = key.style === KeyStyle.ACCENT ? '#FFFFFFFF'
       : (key.enabled ? look.keyText : look.keyTextDisabled);
     ctx.fillStyle = labelColor;
-    const cx = frame.left + frame.width / 2;
+    const cx = f.left + f.width / 2;
 
     if (key.icon !== null) {
       ctx.font = `${fontSize}vp sans-serif`;
-      this.drawIcon(ctx, key.icon, cx, frame.top + frame.height / 2, fontSize, labelColor);
+      this.drawIcon(ctx, key.icon, cx, f.top + f.height / 2, fontSize, labelColor);
     } else {
       // 超宽标签缩字号（对照 Android:179）。
       ctx.font = `${fontSize}vp sans-serif`;
-      const maxWidth = frame.width - 8;
+      const maxWidth = f.width - 8;
       const w = ctx.measureText(key.label).width;
       if (w > maxWidth) {
         fontSize *= maxWidth / w;
@@ -2054,18 +2068,18 @@ export struct MeowpuutKeyboard {
       }
       // 小写字母略上移，视觉居中（对照 Android:176）。
       const lowerLift = (key.isCharacter && key.label.length === 1 && isLowercase(key.label[0]))
-        ? frame.height * 0.04 : 0;
+        ? f.height * 0.04 : 0;
       // 九键数字键：主标上移，角标字母组画在键底部（对照 iOS 九键样式）。
       if (key.sublabel !== null) {
-        const mainY = frame.top + frame.height * 0.36;
+        const mainY = f.top + f.height * 0.36;
         ctx.fillText(key.label, cx, mainY);
         const sub = key.sublabel;
         ctx.font = `${Math.max(9, fontSize * 0.38)}vp sans-serif`;
         ctx.globalAlpha = 0.66;
-        ctx.fillText(sub, cx, frame.top + frame.height * 0.78);
+        ctx.fillText(sub, cx, f.top + f.height * 0.78);
         ctx.globalAlpha = 1;
       } else {
-        ctx.fillText(key.label, cx, frame.top + frame.height / 2 - lowerLift);
+        ctx.fillText(key.label, cx, f.top + f.height / 2 - lowerLift);
       }
     }
   }
