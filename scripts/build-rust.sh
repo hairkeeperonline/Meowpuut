@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds the Rust engine (crates/meowpuut-ffi) as a static library.
+# Builds the Rust engine (Engine submodule, meowpuut-ffi) as a static library.
 #
 #   bash scripts/build-rust.sh macos              -> .build/rust/macosx/libmeowpuut_ffi.a
 #   bash scripts/build-rust.sh iphoneos           -> .build/rust/iphoneos/libmeowpuut_ffi.a
