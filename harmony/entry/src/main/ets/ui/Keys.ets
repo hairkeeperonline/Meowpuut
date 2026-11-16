@@ -309,6 +309,8 @@ function stringToCharArray(s: string): string[] {
 }
 
 export class KeyBuilder {
+  /** 九键专属数字页页码（round 63-4）：通用符号页 1/2、emoji 分类 3-8，九键数字页取 9。 */
+  static readonly NUMERIC_PAGE = 9;
   static readonly zhuyin = ZHUYIN_ROWS;
 
   static get accents(): Map<string, string[]> { return ACCENTS; }
@@ -318,6 +320,9 @@ export class KeyBuilder {
   static build(context: KeyContext): KeySet {
     const t = new Words(context.simplified);
     const chinese = !context.english && context.mode !== InputMode.JAPANESE;
+    // 九键专属数字页（round 63-4，对照安卓 NUMERIC_PAGE=3 走 nineKeyNumbers）：
+    // 我们 page 3-8 被 emoji 分类占用，九键数字页取 9。
+    if (context.page === KeyBuilder.NUMERIC_PAGE) return KeyBuilder.nineKeyNumbers(context, t);
     if (context.page > 0) return KeyBuilder.symbols(context, context.page, chinese, t);
     if (!context.english && context.mode === InputMode.ZHUYIN) return KeyBuilder.zhuyinSet(context, t);
     // 九键拼音：3×4 数字键盘（2-9 每键标字母），T9 组字在引擎侧（T9.ets）。
@@ -347,15 +352,17 @@ export class KeyBuilder {
       }
       rows.push(row);
     }
-    // 行 3: 九键专属底行（真机反馈 round 60-2/6）：符号/空格/删除/换行 四键——
-    // 之前完全没有删除键（长按连删也无从谈起）；ABC/地球不放这行（走设置页）。
-    // 空格弹性撑满中间；长按删除键走既有 DeleteRepeat（420ms 后每 83ms 连删）。
+    // 行 3: 九键底行（round 63-4 对齐安卓 nineKeyBottom）：符號 | 123 | 空格 | 中英切换 | 换行。
+    // 删除键在九键里位于行 1 右端（对照安卓 nineKeySet 的 side=[delete,重输,0]），
+    // 长按连删走既有 DeleteRepeat（420ms 后每 83ms 连删）。
+    // 九键数字页=9（避开通用符号页 1/2 与 emoji 分类页 3-8）。
     const symbolsKey = new Key(new KeyActionPage(1), t.pick('符號', '符号'), null, KeyStyle.UTILITY, [], false, true, 16, t.pick('符號', '符号'));
+    const numberKey = new Key(new KeyActionPage(KeyBuilder.NUMERIC_PAGE), '123', null, KeyStyle.UTILITY, [], false, true, 16, t.pick('數字鍵盤', '数字键盘'));
     const spaceKey = new Key(new KeyActionSpace(), context.spaceTitle, null, KeyStyle.CHARACTER, [], false, true, 16, '空格');
     const returnKey = new Key(new KeyActionReturn(), context.returnTitle, null,
       context.returnAccent ? KeyStyle.ACCENT : KeyStyle.UTILITY, [], false, context.returnEnabled, 16, context.returnTitle);
-    const bottomKeys: Key[] = [symbolsKey, spaceKey, KeyBuilder.deleteKey(t), returnKey];
-    const bottomSpec = new RowSpec([1.4, 0, 1.1, 1.5], RowAlignment.JUSTIFIED);
+    const bottomKeys: Key[] = [symbolsKey, numberKey, spaceKey, KeyBuilder.toggleKey(context), returnKey];
+    const bottomSpec = new RowSpec([1.2, 1.0, 0, 1.0, 1.65], RowAlignment.JUSTIFIED);
     const keyRows: Key[][] = [];
     keyRows.push(rows[0]);
     keyRows.push(rows[1]);
@@ -367,6 +374,45 @@ export class KeyBuilder {
     specs.push(new RowSpec(arrayOfFill(3, 1), RowAlignment.CENTERED));
     specs.push(bottomSpec);
     return new KeySet(keyRows, specs, 3);
+  }
+
+  /** 九键数字页（round 63-4，对照安卓 nineKeyNumbers）：3×4 数字 + 标点环绕。 */
+  private static nineKeyNumbers(context: KeyContext, t: Words): KeySet {
+    const rows: Key[][] = [];
+    // 行 1-3: [左功能/标点 | 三个数字 | 右标点]（左列从上到下：符號 | + | -；右列：删除 | / | #）。
+    const leftCol: Key[] = [
+      new Key(new KeyActionPage(1), t.pick('符號', '符号'), null, KeyStyle.UTILITY, [], false, true, 16, t.pick('符號', '符号')),
+      KeyBuilder.punctuationKey('+'),
+      KeyBuilder.punctuationKey('-'),
+    ];
+    const rightCol: Key[] = [
+      KeyBuilder.deleteKey(t),
+      KeyBuilder.punctuationKey('/'),
+      KeyBuilder.punctuationKey('#'),
+    ];
+    for (let r = 0; r < 3; r++) {
+      const row: Key[] = [leftCol[r]];
+      for (let c = 0; c < 3; c++) {
+        const digit = 1 + r * 3 + c;
+        row.push(new Key(new KeyActionText(String.fromCharCode(48 + digit)), String.fromCharCode(48 + digit), null, KeyStyle.CHARACTER, [], false, true, 20, `数字 ${digit}`));
+      }
+      row.push(rightCol[r]);
+      rows.push(row);
+    }
+    // 底行（对照安卓）: 九键回程 | , | 0 | . | 换行
+    const backKey = new Key(new KeyActionPage(0), t.pick('九鍵', '九键'), null, KeyStyle.UTILITY, [], false, true, 16, t.pick('回到九鍵拼音', '回到九键拼音'));
+    const bottomKeys: Key[] = [
+      backKey,
+      KeyBuilder.punctuationKey(','),
+      new Key(new KeyActionText('0'), '0', null, KeyStyle.CHARACTER, [], false, true, 20, '数字 0'),
+      KeyBuilder.punctuationKey('.'),
+      new Key(new KeyActionReturn(), context.returnTitle, null,
+        context.returnAccent ? KeyStyle.ACCENT : KeyStyle.UTILITY, [], false, context.returnEnabled, 16, context.returnTitle),
+    ];
+    rows.push(bottomKeys);
+    const spec = new RowSpec([1.35, 2.3, 2.3, 2.3, 1.35], RowAlignment.JUSTIFIED);
+    const specs: RowSpec[] = [spec, spec, spec, spec];
+    return new KeySet(rows, specs, 3);
   }
 
   /** 造一个九键数字键：主标数字，角标字母（副文本）。 */
@@ -414,6 +460,13 @@ export class KeyBuilder {
     if (!context.english && context.mode === InputMode.JAPANESE) spoken = '日文';
     else if (context.english) spoken = '中文';
     return new Key(new KeyActionToggleEnglish(), label, null, KeyStyle.UTILITY, [], false, true, 16, spoken);
+  }
+
+  /** 标点键（对照安卓 punctuationKey）：字符上屏，长按出备选。 */
+  private static punctuationKey(mark: string): Key {
+    const base = SYMBOL_ALTERNATES.get(mark);
+    const alts: string[] = base !== undefined ? base.slice() : [];
+    return new Key(new KeyActionText(mark), mark, null, KeyStyle.CHARACTER, alts, true, true, 20, mark);
   }
 
   private static deleteKey(t: Words): Key {

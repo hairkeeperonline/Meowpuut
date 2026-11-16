@@ -1478,3 +1478,5 @@ if (this.composer.composing && this.lastPreviewAt > 0 &&
 **追加修复 2（同轮）**：真机闪退——设置页打不开。根因：深色检测用的全局 `mediaquery.matchMediaSync` 在真机运行时未绑定，且它是 aboutToAppear 第一句（未捕获 → 页面直接死）。修复：改走 `UIContext.getMediaQuery()`（API 12+，import type 消除模块运行时依赖），try/catch 兜底，失败退回浅色渲染。
 
 **追加修复 3（同轮，真机定位）**：设置页闪退真正根因——UX 补丁的 replace_all 把配色助手函数体内的浅色字面量也替换成了助手调用（如 `pageBg` 的浅色分支变成 `return this.pageBg()`），浅色模式 100% 自递归 → `RangeError: Stack overflow` → 进程被杀。真机 hilog 栈：49 帧 `pageBg` 自调用。修复：7 个助手全部恢复字面量；全仓自动化循环调用审计通过（无任何自/互递归）。此前的 mediaquery 改动保留（更稳但非根因）。
+
+**追加修复 4（同轮）**：九键底行对齐安卓原版——此前是自造的「符號/空格/刪除/換行」四键，缺 123 数字键盘与中英切换。现对齐安卓 nineKeyBottom：`符號(1.2) | 123(1.0) | 空格(flex) | 中英切换(1.0) | 换行(1.65)`；删除键位置对照安卓在行 1 右端（side 列）。新增九键专属数字页（NUMERIC_PAGE=9，避开 1/2 通用符号与 3-8 emoji 分类）：3×4 数字 + 标点环绕 + 底行 `九键 | , | 0 | . | 换行`，对照安卓 nineKeyNumbers。
