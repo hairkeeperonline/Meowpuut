@@ -175,14 +175,17 @@ struct SettingsPage {
     return look.accent;
   }
 
-  /** 【UX round 63】页面配色跟随系统深浅色（与键盘深色一族同源）。 */
-  private pageBg(): string { return this.isDark ? '#FF1C1B1F' : this.pageBg(); }
-  private cardBg(): string { return this.isDark ? '#FF26252A' : this.cardBg(); }
-  private secondaryText(): string { return this.isDark ? '#FF9C9CA4' : this.secondaryText(); }
-  private disabledText(): string { return this.isDark ? '#FF5A595F' : this.disabledText(); }
-  private dividerColor(): string { return this.isDark ? '#FF38373D' : this.trackColor(); }
-  private trackColor(): string { return this.isDark ? '#FF444349' : this.trackColor(); }
-  private textPrimary(): string { return this.isDark ? '#FFF2EFF0' : this.textPrimary(); }
+  /** 【UX round 63】页面配色跟随系统深浅色（与键盘深色一族同源）。
+   * 【真机反馈 round 63-3】修复栈溢出闪退：此前 replace_all 把函数体内的浅色
+   * 字面量也换成了助手调用，浅色分支自递归 → RangeError: Stack overflow。
+   */
+  private pageBg(): string { return this.isDark ? '#FF1C1B1F' : '#F2F2F7'; }
+  private cardBg(): string { return this.isDark ? '#FF26252A' : '#FFFFFF'; }
+  private secondaryText(): string { return this.isDark ? '#FF9C9CA4' : '#8A8A8E'; }
+  private disabledText(): string { return this.isDark ? '#FF5A595F' : '#FFC7C7CC'; }
+  private dividerColor(): string { return this.isDark ? '#FF38373D' : '#FFE5E5EA'; }
+  private trackColor(): string { return this.isDark ? '#FF444349' : '#FFE5E5EA'; }
+  private textPrimary(): string { return this.isDark ? '#FFF2EFF0' : '#FF171415'; }
   /** 预览深浅：色调选深色、或跟随系统且系统当前为深色。 */
   private previewDark(): boolean {
     return this.tone === Tone.DARK || (this.tone === Tone.SYSTEM && this.isDark);
