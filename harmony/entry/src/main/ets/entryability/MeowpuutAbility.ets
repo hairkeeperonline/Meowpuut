@@ -57,6 +57,7 @@ class AbilityCallbacks implements KeyboardCallbacks {
   onToggleExpanded(): void { this.ability.onToggleExpanded(); }
   onPet(cat: string): void { this.ability.onPet(cat); }
   onDragPanel(dx: number, dy: number): void { this.ability.dragPanel(dx, dy); }
+  onHide(): void { this.ability.hideByPullDown(); }
 }
 
 export default class MeowpuutAbility extends InputMethodExtensionAbility {
@@ -325,6 +326,7 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     switch (id) {
       case 'MeowpuutZhuyin': return InputMode.ZHUYIN;
       case 'MeowpuutPinyin': return InputMode.PINYIN;
+      case 'MeowpuutPinyin9': return InputMode.PINYIN9;
       case 'MeowpuutJapanese': return InputMode.JAPANESE;
       default: return null;
     }
@@ -376,20 +378,32 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     }
   }
 
+  /** 【候选栏下拉收起】收起面板（下次聚焦重新弹出）。 */
+  hideByPullDown(): void {
+    if (this.panel !== null) {
+      this.panel.hide().catch(() => {});
+      hilog.info(0x0000, 'MeowpuutIME', 'keyboard hidden by candidate-bar pull-down');
+    }
+  }
+
   /** 悬浮面板当前位置（拖动累计用）。 */
   private floatX: number = 0;
   private floatY: number = 0;
 
-  /** 【悬浮键盘】拖动把手：增量移动面板（钳制在屏幕内）。 */
+  /** 【悬浮键盘】拖动把手：增量移动面板（按面板真实宽高钳制，右/下缘不越屏）。 */
   dragPanel(dx: number, dy: number): void {
     if (this.panel === null || this.prefs.keyboardPosition !== 'floating') return;
     const disp: display.Display = display.getDefaultDisplaySync();
-    const nx = Math.max(0, Math.min(disp.width - 24, this.floatX + dx));
-    const ny = Math.max(0, Math.min(disp.height - 200, this.floatY + dy));
+    // 面板真实尺寸（悬浮宽度 = 屏宽-48，高度 = lastPanelHeight）。
+    const panelW = Math.min(disp.width, Math.round(90 * (disp.densityDPI / 160)) > disp.width - 48
+      ? disp.width : disp.width - 48);
+    const panelH = this.lastPanelHeight > 0 ? this.lastPanelHeight : 800;
+    // 左边距和上边距最小 0；右边/下边不允许越出屏幕（显示不全修复）。
+    const nx = Math.max(0, Math.min(disp.width - panelW, this.floatX + dx));
+    const ny = Math.max(0, Math.min(disp.height - panelH, this.floatY + dy));
     this.floatX = nx;
     this.floatY = ny;
     this.panel.moveTo(nx, ny).catch(() => {});
-    hilog.info(0x0000, 'MeowpuutIME', `panel dragged to (${nx},${ny})`);
   }
 
   /**
@@ -415,7 +429,9 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
         const w = Math.max(90 * (disp.densityDPI / 160), disp.width - margin * 2);
         await this.panel.resize(Math.round(w), this.lastPanelHeight);
         const x = margin;
-        const y = Math.round(disp.height * 0.22);
+        // 初始位置：顶部 22% 屏高，但保证面板底部不越出屏幕（显示不全修复）。
+        const maxY = Math.max(margin, disp.height - this.lastPanelHeight - margin);
+        const y = Math.min(Math.round(disp.height * 0.22), maxY);
         this.floatX = x;
         this.floatY = y;
         await this.panel.moveTo(x, y);
@@ -423,6 +439,9 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
       } else {
         hilog.info(0x0000, 'MeowpuutIME', 'panel fixed (bottom)');
       }
+      // 位置切换影响底板透明度（悬浮半透明/贴底不透明），重算 Look 并重绘。
+      this.applyLook();
+      this.refreshKeyboard();
     } catch (e) {
       hilog.warn(0x0000, 'MeowpuutIME', `applyPanelPosition failed: ${JSON.stringify(e)}`);
     }
@@ -759,6 +778,7 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     if (!this.composer.ready) {
       if (this.lexiconFailed) {
         if (this.mode === InputMode.PINYIN) this.commit(String.fromCharCode(c));
+        else if (this.mode === InputMode.PINYIN9 && c >= 50 && c <= 57) this.commit(String.fromCharCode(c));
         return;
       }
       this.pending.push(c);
@@ -909,11 +929,12 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     this.switchSubtype();
   }
 
-  /** 在自己的注音/拼音/日语子类型之间轮换（供设置页与地球键调用）。 */
+  /** 在自己的注音/全键拼音/九键拼音/日语子类型之间轮换（供设置页与地球键调用）。 */
   switchSubtype(): void {
-    const order: string[] = ['MeowpuutZhuyin', 'MeowpuutPinyin', 'MeowpuutJapanese'];
+    const order: string[] = ['MeowpuutZhuyin', 'MeowpuutPinyin', 'MeowpuutPinyin9', 'MeowpuutJapanese'];
     const current: string = this.mode === InputMode.PINYIN ? 'MeowpuutPinyin'
-      : this.mode === InputMode.JAPANESE ? 'MeowpuutJapanese' : 'MeowpuutZhuyin';
+      : this.mode === InputMode.PINYIN9 ? 'MeowpuutPinyin9'
+        : this.mode === InputMode.JAPANESE ? 'MeowpuutJapanese' : 'MeowpuutZhuyin';
     const next: string = order[(order.indexOf(current) + 1) % order.length];
     const target: InputMethodSubtype = {
       id: next,
@@ -1131,6 +1152,8 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
       this.lexiconFailed = target !== InputMode.JAPANESE && session === 0;
       this.composer.japaneseWords = this.lexicons ? this.lexicons.japanese : JapaneseWords.EMPTY;
       this.composer.attach(target, session);
+      // 九键 shadow 查询会话（pinyin 词库时 Lexicons 已备好）。
+      this.composer.attachT9Shadow(this.lexicons !== null ? this.lexicons.t9Session() : 0);
       this.sessionMode = target;
       const queued = this.pending.slice();
       this.pending = [];
@@ -1153,7 +1176,7 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
       : null;
     this.look = new Look(dark, this.prefs.shape, this.prefs.palette, this.prefs.strength,
       this.prefs.cats, festivalPill, false, this.prefs.keyPopups, this.prefs.keyboardHeight,
-      this.prefs.effects);
+      this.prefs.effects, this.prefs.keyboardPosition === 'floating');
   }
 
   private readRawFileText(path: string): string {
@@ -1172,7 +1195,8 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     if (!this.composer.composing) return this.english ? 'space' : '空格';
     const w = (s1: string, s2: string) => this.prefs.simplified ? s2 : s1;
     switch (this.mode) {
-      case InputMode.PINYIN: return this.composer.candidates.length > 0 ? w('選詞', '选词') : '原文＋空格';
+      case InputMode.PINYIN:
+      case InputMode.PINYIN9: return this.composer.candidates.length > 0 ? w('選詞', '选词') : '原文＋空格';
       case InputMode.JAPANESE: return w('選詞', '选词');
       case InputMode.ZHUYIN: {
         const last = this.composer.input.charAt(this.composer.input.length - 1);
@@ -1212,6 +1236,7 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     switch (this.mode) {
       case InputMode.JAPANESE: return '日本語';
       case InputMode.PINYIN: return `拼音 · ${script}`;
+      case InputMode.PINYIN9: return `九键 · ${script}`;
       case InputMode.ZHUYIN: return `注音 · ${script}`;
       default: return script;
     }
@@ -1287,6 +1312,10 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
       let digit = -1;
       if (this.mode === InputMode.PINYIN && c >= '1' && c <= '9') {
         digit = c.charCodeAt(0) - '1'.charCodeAt(0);
+      } else if (this.mode === InputMode.PINYIN9 && c >= '2' && c <= '9' && this.composer.ready) {
+        // 物理键盘九键：数字 2-9 直接进 T9 组字。
+        this.typeEngine(c.charCodeAt(0), null, true);
+        return true;
       } else if (this.mode === InputMode.ZHUYIN && ev.shiftKey) {
         digit = '!@#$%^&*('.indexOf(c);
       }
@@ -1300,6 +1329,9 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     switch (this.mode) {
       case InputMode.PINYIN:
         accepted = (isAsciiLetter(c) && c.charCodeAt(0) < 128) || (c === "'" && this.composer.composing);
+        break;
+      case InputMode.PINYIN9:
+        accepted = c >= '2' && c <= '9';
         break;
       case InputMode.JAPANESE:
         accepted = (isAsciiLetter(c) && c.charCodeAt(0) < 128) || (c === '-' && this.composer.composing);
@@ -1373,7 +1405,7 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
       this.expanded,
       this.composer.composing && all.length > 0,
       this.composer.composing,
-      this.mode === InputMode.PINYIN,
+      this.mode === InputMode.PINYIN || this.mode === InputMode.PINYIN9,
       this.festivalTheme,
     );
   }

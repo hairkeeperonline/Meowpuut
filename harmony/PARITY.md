@@ -1184,3 +1184,114 @@ if (this.composer.composing && this.lastPreviewAt > 0 &&
 `imeDialog` CustomDialogController + `InputMethodListDialog` import，只保留
 「打开键盘设置」跳系统页；ENABLED 文案改为引导用户去系统输入法页选择喵扑。
 子类型切换仍可通过设置页「输入方式」下拉或键盘地球键完成。
+
+## round 59：用户 9 条反馈逐项修复（离线收尾——真机已断开，构建通过 + 静态/像素取证）
+
+> 背景：本轮起真机 56V0225905003230 USB 断开且不再可用。9 条修复全部完成代码、
+> `build-harmony-hap.ps1` 构建通过（BUILD SUCCESSFUL），按「静态代码审查 + 历史
+> 截图像素分析 + Python 枚举仿真」三级取证；**真机复验清单**见本节末尾，设备
+> 恢复后逐条执行。
+
+### (1) 九键拼音——真实 T9 引擎（鸿蒙独有增强，Android/iOS 均无九键）
+
+- **核心 bug**：`Lexicons.open` 的 `const pinyin = mode === InputMode.PINYIN`
+  只认全键拼音，九键加载的是注音词库——round 56 的九键「完全无候选」即源于此。
+  已改为 `PINYIN || PINYIN9`。
+- **架构**（Rust core 无法本地重编——无 cargo 工具链，T9 纯 ArkTS 实现）：
+  - 新文件 `engine/T9.ets`：404 音节表 → 217 个数字编码；`splits()`（DP 可达性
+    切分，SPLIT_CAP=12、短切分优先）；`combos()`（每段音节笛卡尔积，COMBO_CAP=24、
+    短音节优先）；`preeditText()`（首选切分拼音分段提示）；`query()`（影子会话
+    重放：clear → 逐字母 key → candidates，每组合 8 个候选）。
+  - **候选排序**：先按「切分段数少 → 首候选 EXACT（引擎 kind=1）」对组合排序
+    再合并去重（cap 64）——否则 `64426` 的 mi-gan 组合会淹没 ni-hao 的「你好」。
+  - **影子会话**：`Lexicons` 用同一拼音词库 `sessionCreate` 第二个会话
+    （`t9Shadow`），`Composer.attachT9Shadow()` 接线；主会话在九键模式下保持
+    零输入（backspace/choose 都不触它）。
+- **键盘布局**：`Keys.ets` `nineKeySet()` 经典 3×4——`1` 键=标点（点击上屏「。」，
+  长按备选「，、？！…；：”…」），2-9 数字主标+角标字母组（`Key.sublabel` 新字段，
+  绘制在 `MeowpuutKeyboard` 主标下方 0.38× 字号、alpha 0.66）；底行为标准
+  符号/ABC/地球/空格/换行。
+- **子类型**：`input_method_config.json` 注册 `MeowpuutPinyin9`（zh-CN/lower，
+  label `ime_label_pinyin9`「喵扑输入法 九键拼音」）；`modeOfSubtype`、设置页
+  输入方式下拉、`switchSubtype` 地球键循环（注音→全拼→九拼→日语）全链路接入；
+  `switchCurrentInputMethodSubtype` 仍走系统通知（跨进程 preferences 不互通的
+  既有结论）。
+- **物理键盘**：九键态数字 2-9 直通 `typeEngine`；词库失败时数字直接上屏兜底。
+- **Python 仿真验证**：`64426`→2 切分（mi-gan/ni-hao）；`926426`→9 切分；
+  `7764`→0 切分（qq 非音节，回退数字串候选）；`726`→2 切分——枚举逻辑正确。
+
+### (2) 悬浮键盘：显示不全 + 拖动不跟手
+
+- **拖动不跟手（根因）**：`PanGesture.onActionUpdate` 的 `event.offsetX` 是
+  **相对手势起点的总位移**而非增量，旧代码 `dragAccumX += offsetX` 会指数级
+  累积漂移；且 24px 批量提交让面板一跳一跳。改为基线差分（`offsetX - 上次已提交`）
+  **每帧 moveTo**（`KeyboardPage.ets`）。
+- **显示不全（两处钳制错误）**：`dragPanel` 旧 clamp 是
+  `nx ∈ [0, disp.width-24]`——按面板左上角而非右缘算，可把 1272px 宽的面板拖出
+  屏外。改为按面板真实宽高 `nx ∈ [0, width-panelW]`、`ny ∈ [0, height-panelH]`；
+  `applyPanelPosition` 初始位置同样保证 `y + panelH ≤ height - margin`。
+
+### (3) 字母/猫咪候选区背景透明（悬浮态）
+
+- `Look` 新增 `translucentPanel` 字段：悬浮态 `keyboardTop/Bottom` 由
+  `#FF…`（不透明）降为 `#E6…`（90% alpha），候选栏与键区 Canvas 透出底层应用
+  ——「浮在应用上的卡片」观感；贴底态保持不透明（对齐 Android `Theme.kt:62`）。
+  组件根容器本就 `Color.Transparent`，无额外层。
+
+### (4) 键帽与底板玻璃形态
+
+- **底板**：`drawKeys`/`drawCandidateBar` 的背景由整块矩形改为**顶部按造型轮廓
+  起伏**的路径（`glassTop(look.shape, x, …)` 逐点采样 48 段）：胶囊=平直圆角、
+  波浪=S 形、云朵=鼓包——造型切换时整块键盘底板与候选玻璃连成一体。
+- **键帽**：圆角随造型变化（WAVE=1.35×、CLOUD=1.18×，cap 到键高一半），
+  胶囊保持默认——波浪/云朵造型下键帽更圆润，与候选玻璃呼应。
+
+### (5) 长文本候选重叠（根因）
+
+- `drawRow` 里 pill 宽度按 `shown`（截断后）算，但 `items.push` 存的是
+  `c.text` **原文**——绘制时 `fillText(item.text)` 画出超宽原文，溢出 pill
+  与相邻候选叠字。修复：`items.push(..., shown, ...)`，pill/文字/命中检测
+  （`hitCandidate` 本就按 shown）三者一致。
+
+### (6) 候选栏下拉收起键盘（鸿蒙增强）
+
+- `barPress` 记录 `barDownY`；`barMove` 检测 `dy > 64 && dy > |dx|·1.5`（横向
+  拖动仍是候选滚动）→ 新回调 `KeyboardCallbacks.onHide` →
+  `MeowpuutAbility.hideByPullDown()` → `panel.hide()`（下次聚焦自动再弹）。
+
+### (7)+(9) 深色药丸错位 & 快打不高亮在第一候选（同一族根因）
+
+- **(9) 动画重定向**：`pillSlideX` 动画进行中目标变化时，旧代码让旧动画跑完
+  （`pillToX` 未更新），胶囊短暂停在旧目标。改为检测 `|toX-pillToX|>0.5` 立即
+  以当前插值位为 from 重启动画（easeOutCubic 接续，无跳变）。
+- **(9) 滚动残留**：Android `CandidateBarView.update` 在 `newRow` 时 `scroll=0`，
+  鸿蒙缺这个——打字加长候选后第一个候选被旧 scroll 推出屏，高亮「看起来不在
+  第一个候选」。`refresh()` 现在按候选/预测行内容变化归零 `barScroll`。
+- **(7)**：(5) 的 pill/文字错位修复同样消除深色下最显眼的错位；滑动动画时长
+  240ms→150ms，错位窗口缩短近半。
+
+### (8) 最下方灰底两个图标——已定位（像素取证），非我方绘制
+
+- 历史截图像素分析：图标在 **y2011-2078**，左 `x133-192`、右 `x1127-1186`
+  （各 60px），位于我方键区 Canvas 内容（自然键高排版至 ~y2020）之下的
+  panel 底部条带——**globes（输入法切换）+ 齿轮/菜单（输入法设置）样式的系统
+  工具条**，画在 IME 面板窗口的系统层，我方代码（Glyphs/Keys/KeyboardPage 全
+  检索）无任何对应绘制路径。SDK `@ohos.inputMethod.Panel.d.ts` /
+  `@ohos.inputMethodEngine.d.ts` 全文无 toolbar API。
+- **处置**：系统 UI 无法由第三方 IME 移除；待设备恢复后以 `uitest dumpLayout`
+  确认其不在应用窗口节点树（终局证据），并向用户说明这是系统级工具条。
+
+### 真机复验清单（设备恢复后逐条执行并截图取证）
+
+1. 设置页切「九键拼音」→ 备忘录打 `64426`：3×4 布局 + 角标字母组渲染；候选
+   首位应为「你好」（mi-gan 不淹没）；打 `7764` 回退数字候选；`926426` 出
+   「熊猫/王小明」类多切分候选；hilog 测逐键候选时延（96 组合最坏 case 上限 24）。
+2. 悬浮模式拖动把手：连续画圈拖动——面板每帧跟手、无跳变；四缘钳制不越屏。
+3. 悬浮态下开备忘录——键区/候选区透出底层应用 10% 底色。
+4. 造型切波浪/云朵——底板上沿起伏 + 键帽圆角变化截图对比。
+5. 长句组字（10+ 键）——候选无叠字、超宽候选中段省略号截断。
+6. 候选栏指下滑 64px+ ——键盘收起。
+7. 深色 + 快速连打——高亮始终居第一候选、动画 150ms 内到位。
+8. `uitest dumpLayout` 确认底部两图标不在应用节点树（反馈 8 终局证据）。
+9. 九键面板高度与 4 行布局的 `resizePanel` 数值核对（上次贴底实测 981px vs
+   推算 945px 的 36px 差——用 hilog 打点 panel.resize 实参定位）。

@@ -15,6 +15,10 @@
     {
       "name": "ime_desc",
       "value": "喵扑输入法（注音/拼音/日语混合输入）"
+    },
+    {
+      "name": "ime_label_pinyin9",
+      "value": "喵扑输入法 九键拼音"
     }
   ]
 }

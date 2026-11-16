@@ -8,7 +8,7 @@ import { Key, KeySet, KeyIcon, KeyStyle, KeyBuilder, KeyContext, ShiftState } fr
 import { KeyTouches, KeyListener, TouchHost } from './KeyTouches';
 import { GlassPainter, PillPainter, roundRect, Glyphs, tracePath } from './Painting';
 import { Look, withAlpha, lighten, isLowercase, Palette, GlassStrength } from './Theme';
-import { GlassShape, contentBand } from './GlassOutline';
+import { GlassShape, contentBand , glassTop } from './GlassOutline';
 import { CatSeats, CatStage, Cat, CatPlacement } from './CatStage';
 import { CatSpriteData, CatSprite } from './CatSpriteData';
 import { CatMotion, CatPose, CatAffection } from './Cats';
@@ -218,6 +218,8 @@ export struct MeowpuutKeyboard {
   onPunctuationEvt?: (mark: string) => void;
   onToggleExpandedEvt?: () => void;
   onPetEvt?: (cat: string) => void;
+  /** 候选栏下拉收起键盘。 */
+  onHideEvt?: () => void;
 
   private state: KeyboardState = makeEmptyState();
   private touches: KeyTouches | null = null;
@@ -264,7 +266,7 @@ export struct MeowpuutKeyboard {
   /** 上一帧实画的胶囊位置（内容坐标）；-1 = 还没画过。 */
   private pillDrawnX: number = -1;
   private pillDrawnW: number = 0;
-  private static readonly PILL_SLIDE_MS = 240;
+  private static readonly PILL_SLIDE_MS = 150;
 
   /** 摸猫提示是否 emphasis（简繁切换成功的醒目强调）。 */
   private toastEmphasis: boolean = false;
@@ -277,6 +279,7 @@ export struct MeowpuutKeyboard {
   private barContentWidth: number = 0;
   private barDragId: number = -1;
   private barDownX: number = 0;
+  private barDownY: number = 0;
   private barDownScroll: number = 0;
   private barDragging: boolean = false;
   private barVel: number = 0;
@@ -485,6 +488,30 @@ export struct MeowpuutKeyboard {
 
   /** 由宿主（ability）调用刷新。 */
   refresh(next: KeyboardState, resetPanel: boolean = false): void {
+    // 候选行内容变化时归零横向滚动（对照 Android CandidateBarView.update 的
+    // newRow → scroll=0）：否则打字加长后第一个候选被滚出屏，高亮药丸看起来
+    // 不以第一个候选为中心（用户反馈第 9 条）。
+    let rowChanged = false;
+    if (next.visibleIndices.length !== this.state.visibleIndices.length) {
+      rowChanged = true;
+    } else {
+      for (let i = 0; i < next.visibleIndices.length; i++) {
+        const a = next.candidates[next.visibleIndices[i]];
+        const b = this.state.candidates[this.state.visibleIndices[i]];
+        if (a === undefined || b === undefined || a.text !== b.text) { rowChanged = true; break; }
+      }
+    }
+    // 预测行同理（非组字态显示预测）。
+    if (!rowChanged) {
+      if (next.predictions.length !== this.state.predictions.length) {
+        rowChanged = true;
+      } else {
+        for (let i = 0; i < next.predictions.length; i++) {
+          if (next.predictions[i] !== this.state.predictions[i]) { rowChanged = true; break; }
+        }
+      }
+    }
+    if (rowChanged) this.barScroll = 0;
     this.state = next;
     this.rebuild();
   }
@@ -518,9 +545,19 @@ export struct MeowpuutKeyboard {
    */
   private pillSlideX(toX: number, toW: number): [number, number] | null {
     const now = Date.now();
-    const animating = now < this.pillAnimStart + MeowpuutKeyboard.PILL_SLIDE_MS;
+    let animating = now < this.pillAnimStart + MeowpuutKeyboard.PILL_SLIDE_MS;
     let fromX = this.pillDrawnX;   // 上一次实画的 x（可能本身就是插值帧）
     let fromW = this.pillDrawnW;
+    // 动画进行中目标变了（快速连续打字候选重排）：立刻把动画「接」到新目标上，
+    // 从当前插值位置重启 —— 否则旧动画继续跑、胶囊短暂停在旧目标，观感是
+    // 高亮底色偶尔不在第一个候选上（用户反馈「快打时底色不以第一个字符为中心」）。
+    if (animating && (Math.abs(toX - this.pillToX) > 0.5 || Math.abs(toW - this.pillToW) > 0.5)) {
+      this.pillFromX = fromX;
+      this.pillFromW = fromW;
+      this.pillToX = toX;
+      this.pillToW = toW;
+      this.pillAnimStart = now;
+    }
     if (!animating) {
       if (fromX < 0 || Math.abs(toX - fromX) > this.kbWidth) {
         // 首次出现 / 列表大变（新组字）：不滑，直接就位。
@@ -803,7 +840,7 @@ export struct MeowpuutKeyboard {
   /** 候选栏触控：优先命中箭头与候选词，其次才是摸猫。 */
   private handleBarTouch(event: TouchEvent): void {
     for (const change of event.changedTouches) {
-      if (change.type === TouchType.Move) { this.barMove(change.id, change.x); continue; }
+      if (change.type === TouchType.Move) { this.barMove(change.id, change.x, change.y); continue; }
       if (change.type === TouchType.Up || change.type === TouchType.Cancel) {
         this.barRelease(change.id);
         // 抬手清除猫的按压态（squash 只按着时生效）。
@@ -873,10 +910,11 @@ export struct MeowpuutKeyboard {
    * 所以要能横向拖：按下先记位置，抬手时再决定是点击还是拖动
    * （对应 Android CandidateBarView 的 downX / downScroll / scroll 状态机）。
    */
-  private barPress(id: number, x: number, _y: number): void {
+  private barPress(id: number, x: number, y: number): void {
     this.barFlingStop();
     this.barDragId = id;
     this.barDownX = x;
+    this.barDownY = y;
     this.barDownScroll = this.barScroll;
     this.barDragging = false;
     this.barLastX = x;
@@ -887,9 +925,18 @@ export struct MeowpuutKeyboard {
   }
 
   /** 候选行拖动中。 */
-  private barMove(id: number, x: number): void {
+  private barMove(id: number, x: number, y: number = 0): void {
     if (this.barDragId !== id) return;
     const dx = x - this.barDownX;
+    // 【候选栏下拉收起】纵向下拉超过 64px 且纵向位移大于横向（横向是滚动候选），
+    // 收起键盘（对照 iOS 键盘候选栏下拉 hide；鸿蒙增强）。
+    const dy = y - this.barDownY;
+    if (dy > 64 && dy > Math.abs(dx) * 1.5) {
+      this.barDragId = -1;
+      this.barTapValid = false;
+      this.onHideEvt?.();
+      return;
+    }
     if (!this.barDragging && Math.abs(dx) > 8) this.barDragging = true;
     if (!this.barDragging) return;
     this.barTapValid = false;
@@ -1028,7 +1075,19 @@ export struct MeowpuutKeyboard {
     // 候选区在键盘最顶部，此处渐变起点就是 keyboardTop，短距离内近似纯色；
     // 键区 Canvas 在下方继续画同一渐变（drawKeys），二者拼成完整键盘背景。
     ctx.fillStyle = look.keyboardTop;
-    ctx.fillRect(0, 0, w, h);
+    // 顶部同样应用造型轮廓（胶囊平直/波浪/云朵），与键区地板连成整块玻璃底板。
+    const shapeH2 = Math.min(h, 40);
+    ctx.beginPath();
+    ctx.moveTo(0, h);
+    ctx.lineTo(0, shapeH2);
+    const steps2 = 48;
+    for (let i = 0; i <= steps2; i++) {
+      const x = w * i / steps2;
+      ctx.lineTo(x, glassTop(look.shape, x, w, shapeH2));
+    }
+    ctx.lineTo(w, h);
+    ctx.closePath();
+    ctx.fill();
 
     // 玻璃。
     GlassPainter.shadow(ctx, look.shape, region.glass, look.dark);
@@ -1359,9 +1418,12 @@ export struct MeowpuutKeyboard {
         const japanese = c.kind === 'JAPANESE_WORD' || c.kind === 'MIXED' || c.kind === 'MIXED_PREFIX' || c.kind === 'KANA';
         const mark = japanese && st.japaneseMarks ? font * 0.45 + 3 : 0;
         const measure = ctx.measureText(c.text).width;
+        // 超宽候选截中段；pill 宽度按截断后文本算，绘制也必须画截断文本——
+        // 否则长候选文字溢出 pill、与相邻候选叠在一起（用户反馈「打字很长时候选
+        // 字符混在一起」）。
         const shown = measure > maxText - mark ? truncateMiddle(c.text, ctx, maxText - mark) : c.text;
         const width = Math.max(region.pillHeight, ctx.measureText(shown).width + 24 + mark);
-        items.push(new CandidateItem(i, 0, c.text, width, japanese && st.japaneseMarks));
+        items.push(new CandidateItem(i, 0, shown, width, japanese && st.japaneseMarks));
         x += width + gap;
       }
     } else if (st.predictions.length > 0) {
@@ -1551,11 +1613,24 @@ export struct MeowpuutKeyboard {
     const total = this.keysAreaHeight();
 
     // 背景渐变：上浅下深（对应 Android KeyboardView.kt:158 的 LinearGradient）。
+    // 底板应用玻璃造型（用户反馈「地板没有应用玻璃形态」）：上沿按
+    // 造型起伏（胶囊平直圆角/波浪 S 形/云朵鼓包），其余三边贴面板边缘。
     const bg = ctx.createLinearGradient(0, 0, 0, total);
     bg.addColorStop(0, look.keyboardTop);
     bg.addColorStop(1, look.keyboardBottom);
     ctx.fillStyle = bg;
-    ctx.fillRect(0, 0, w, total);
+    const shapeH = Math.min(total, 56);
+    ctx.beginPath();
+    ctx.moveTo(0, total);
+    ctx.lineTo(0, shapeH);
+    const steps = 48;
+    for (let i = 0; i <= steps; i++) {
+      const x = w * i / steps;
+      ctx.lineTo(x, glassTop(look.shape, x, w, shapeH));
+    }
+    ctx.lineTo(w, total);
+    ctx.closePath();
+    ctx.fill();
 
     // 展开面板：覆盖键区的候选网格，不画按键。
     if (this.state.expanded && this.state.composing) {
@@ -1865,14 +1940,21 @@ export struct MeowpuutKeyboard {
       fill = grad;
     }
     ctx.fillStyle = fill;
+    // 键帽玻璃形态（用户反馈「键帽没有应用玻璃形态」）：圆角随造型变化——
+    // 胶囊=默认小圆角，波浪=更圆的胶囊，云朵=中等圆角（不对称鼓包对单键太碎）。
+    const shapeR = look.shape === GlassShape.WAVE
+      ? Math.min(frame.height / 2, m.cornerRadius * 1.35)
+      : look.shape === GlassShape.CLOUD
+        ? Math.min(frame.height / 2, m.cornerRadius * 1.18)
+        : m.cornerRadius;
     // 底部 1dp 实心底边（对照 Android KeysView.kt:127-129 的 crisp bottom edge）。
     ctx.fillStyle = look.keyShadow;
-    roundRect(ctx, frame.left, frame.top + 1, frame.width, frame.height, m.cornerRadius);
+    roundRect(ctx, frame.left, frame.top + 1, frame.width, frame.height, shapeR);
     ctx.fill();
     // 键面。空格移光标时键面半透明、标签隐藏（对照 Android KeysView.kt:138,146）。
     if (cursorMode) ctx.globalAlpha = 170 / 255;
     ctx.fillStyle = fill;
-    roundRect(ctx, frame.left, frame.top, frame.width, frame.height, m.cornerRadius);
+    roundRect(ctx, frame.left, frame.top, frame.width, frame.height, shapeR);
     ctx.fill();
     if (cursorMode) ctx.globalAlpha = 1;
 
@@ -1907,7 +1989,18 @@ export struct MeowpuutKeyboard {
       // 小写字母略上移，视觉居中（对照 Android:176）。
       const lowerLift = (key.isCharacter && key.label.length === 1 && isLowercase(key.label[0]))
         ? frame.height * 0.04 : 0;
-      ctx.fillText(key.label, cx, frame.top + frame.height / 2 - lowerLift);
+      // 九键数字键：主标上移，角标字母组画在键底部（对照 iOS 九键样式）。
+      if (key.sublabel !== null) {
+        const mainY = frame.top + frame.height * 0.36;
+        ctx.fillText(key.label, cx, mainY);
+        const sub = key.sublabel;
+        ctx.font = `${Math.max(9, fontSize * 0.38)}vp sans-serif`;
+        ctx.globalAlpha = 0.66;
+        ctx.fillText(sub, cx, frame.top + frame.height * 0.78);
+        ctx.globalAlpha = 1;
+      } else {
+        ctx.fillText(key.label, cx, frame.top + frame.height / 2 - lowerLift);
+      }
     }
   }
 

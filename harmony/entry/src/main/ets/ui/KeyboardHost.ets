@@ -58,6 +58,8 @@ export interface KeyboardCallbacks {
   onPet(cat: string): void;
   /** 【悬浮键盘】拖动把手：把面板移动 (dx,dy) 像素。 */
   onDragPanel(dx: number, dy: number): void;
+  /** 【候选栏下拉】手指在候选栏下滑超过阈值时收起键盘（鸿蒙增强）。 */
+  onHide(): void;
 }
 
 /** 键盘状态由 ability 写入，页面读取后渲染。 */

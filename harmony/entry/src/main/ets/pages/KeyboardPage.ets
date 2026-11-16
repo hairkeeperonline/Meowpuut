@@ -10,9 +10,9 @@ import { Key } from '../ui/Keys';
 @Component
 struct KeyboardPage {
   private host: KeyboardHost = KeyboardHost.get();
-  /** 悬浮键盘拖动把手：悬浮态顶部 32px 高的拖动条（PanGesture → panel.moveTo）。 */
-  private dragAccumX: number = 0;
-  private dragAccumY: number = 0;
+  /** 拖动起点（手势开始时的累计偏移为 0，offsetX/Y 即相对起点的总位移）。 */
+  private dragBaseX: number = 0;
+  private dragBaseY: number = 0;
   /** 悬浮态开关：ability 通过 AppStorage 写入（普通类字段非响应式，必须走 AppStorage）。 */
   @StorageLink('meowpuutDraggable') floatDraggable: boolean = false;
 
@@ -34,17 +34,19 @@ struct KeyboardPage {
         .gesture(
           PanGesture({ fingers: 1, distance: 2 })
             .onActionStart(() => {
-              this.dragAccumX = 0;
-              this.dragAccumY = 0;
+              this.dragBaseX = 0;
+              this.dragBaseY = 0;
             })
             .onActionUpdate((event: GestureEvent) => {
-              // 累计偏移（event 提供的是增量），过 24px 批量提交一次 moveTo。
-              this.dragAccumX += event.offsetX;
-              this.dragAccumY += event.offsetY;
-              if (Math.abs(this.dragAccumX) >= 24 || Math.abs(this.dragAccumY) >= 24) {
-                this.host.callbacks?.onDragPanel(Math.round(this.dragAccumX), Math.round(this.dragAccumY));
-                this.dragAccumX = 0;
-                this.dragAccumY = 0;
+              // offsetX/Y 是相对手势起点的总位移：把总位移作为一次增量提交
+              // （减去上一次已提交的基线），每帧都 moveTo —— 不做 24px 批量，
+              // 批量化会让面板一跳一跳不跟手（用户反馈「拖动不丝滑」）。
+              const dx = event.offsetX - this.dragBaseX;
+              const dy = event.offsetY - this.dragBaseY;
+              if (dx !== 0 || dy !== 0) {
+                this.dragBaseX = event.offsetX;
+                this.dragBaseY = event.offsetY;
+                this.host.callbacks?.onDragPanel(Math.round(dx), Math.round(dy));
               }
             })
         )
@@ -65,6 +67,7 @@ struct KeyboardPage {
         onPunctuationEvt: (mark: string) => this.host.callbacks?.onPunctuation(mark),
         onToggleExpandedEvt: () => this.host.callbacks?.onToggleExpanded(),
         onPetEvt: (cat: string) => this.host.callbacks?.onPet(cat),
+        onHideEvt: () => this.host.callbacks?.onHide(),
       })
     }
     .width('100%')

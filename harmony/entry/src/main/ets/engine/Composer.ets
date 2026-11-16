@@ -7,6 +7,7 @@ import { NativeEngine } from './NativeEngine';
 import { JapaneseWords } from './JapaneseWords';
 import { Romaji } from './Romaji';
 import { CandidateMerge } from './CandidateMerge';
+import { T9 } from './T9';
 
 const FIRST_BATCH = 48;
 const TONES = ' 6347';
@@ -21,6 +22,8 @@ export class Composer {
   private _simplified: boolean = false;
 
   private session: number = 0;
+  /** 九键拼音的 shadow 查询会话（与主 session 共用词库，可随意重放）。 */
+  private t9Session: number = 0;
   private maxInput: number = 64;
   private raw: string = '';
   private coreTotal: number = 0;
@@ -58,6 +61,7 @@ export class Composer {
 
   attach(mode: InputMode, session: number): void {
     this.session = 0;
+    this.releaseT9();
     this.clear();
     this._mode = mode;
     this.session = mode === InputMode.JAPANESE ? 0 : session;
@@ -70,18 +74,43 @@ export class Composer {
   detach(): void {
     this.clear();
     this.session = 0;
+    this.releaseT9();
+  }
+
+  /** 九键 shadow 会话的延迟创建（首次需要时从 Lexicons 借 lexicon 不可行——
+   * NAPI 只有 sessionCreate(lexicon)。Lexicons.open 回调把第二个 session 一并建好，
+   * Composer 通过 attachT9Shadow 接收）。 */
+  attachT9Shadow(shadow: number): void {
+    this.releaseT9();
+    this.t9Session = shadow;
+  }
+
+  private releaseT9(): void {
+    if (this.t9Session !== 0) {
+      NativeEngine.sessionDestroy(this.t9Session);
+      this.t9Session = 0;
+    }
   }
 
   type(code: number): Edit {
     const c = String.fromCharCode(code);
     switch (this._mode) {
-      // 九键拼音（PINYIN9）T9 引擎暂未实现，降级到全键拼音输入路径（见 PARITY round 56）。
-      case InputMode.PINYIN:
-      case InputMode.PINYIN9: return this.typePinyin(c);
+      case InputMode.PINYIN: return this.typePinyin(c);
+      // 九键拼音：数字 2-9 累积成 T9 串，候选由 T9.query 枚举拼音组合得出。
+      case InputMode.PINYIN9: return this.typePinyin9(c);
       case InputMode.ZHUYIN: return this.typeZhuyin(c);
       case InputMode.JAPANESE: return this.typeJapanese(c);
       default: return { handled: false, commit: '' };
     }
+  }
+
+  /** 九键数字输入：只接受 2-9（0/1 不在此路径），直接累积 raw 后重建。 */
+  private typePinyin9(c: string): Edit {
+    if (c < '2' || c > '9') return { handled: false, commit: '' };
+    if (this.raw.length >= 12) return { handled: true, commit: '' };
+    this.raw += c;
+    this.rebuild();
+    return { handled: true, commit: '' };
   }
 
   private typePinyin(c: string): Edit {
@@ -156,7 +185,8 @@ export class Composer {
   backspace(): Edit {
     if (this.raw.length === 0) return { handled: false, commit: '' };
     this.raw = this.raw.substring(0, this.raw.length - 1);
-    if (this._mode !== InputMode.JAPANESE && this.session !== 0) {
+    // 九键不驱动主 session（主 session 仍为零输入状态），直接重建即可。
+    if (this._mode !== InputMode.JAPANESE && this._mode !== InputMode.PINYIN9 && this.session !== 0) {
       if (this.raw.length === 0) {
         NativeEngine.clear(this.session);
       } else {
@@ -178,6 +208,12 @@ export class Composer {
     const c = index >= 0 && index < this.candidates.length ? this.candidates[index] : null;
     if (c === null) {
       return this.raw.length === 0 ? { handled: false, commit: '' } : { handled: true, commit: this.takeLiteral() };
+    }
+    // 九键候选是 shadow 会话合成的（coreIndex=-1）：上屏后清空整个组合
+    // （九键没有「消耗部分输入继续组字」的引擎状态可用）。
+    if (this._mode === InputMode.PINYIN9) {
+      this.resetCore();
+      return { handled: true, commit: c.text };
     }
     switch (c.kind) {
       case CandidateKind.CHINESE: {
@@ -207,6 +243,12 @@ export class Composer {
   }
 
   takeLiteral(): string {
+    // 九键的「原样上屏」= 数字串本身。
+    if (this._mode === InputMode.PINYIN9) {
+      const text = this.raw;
+      this.resetCore();
+      return text;
+    }
     const text = this._mode === InputMode.ZHUYIN ? this.preedit : this.raw;
     this.resetCore();
     return text;
@@ -301,8 +343,21 @@ export class Composer {
       return;
     }
     switch (this._mode) {
-      case InputMode.PINYIN:
       case InputMode.PINYIN9: {
+        // 九键：组字框显示首选切分的拼音分段；候选走 T9 组合枚举。
+        this._preedit = T9.preeditText(this.raw);
+        this.coreTotal = 0;
+        this.coreFetched = 0;
+        const list = T9.query(this.raw, this.t9Session, this._simplified);
+        // 没有中文候选时兜底显示数字串本身（可上屏数字）。
+        if (list.length === 0) {
+          this._candidates = [{ text: this.raw, kind: CandidateKind.LITERAL, coreIndex: -1, consumed: this.raw.length }];
+        } else {
+          this._candidates = list;
+        }
+        break;
+      }
+      case InputMode.PINYIN: {
         this._preedit = this.raw;
         this.coreTotal = NativeEngine.candidateCount(this.session);
         this.coreFetched = 0;

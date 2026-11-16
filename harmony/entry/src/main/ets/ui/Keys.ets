@@ -88,6 +88,8 @@ export class Key {
   readonly enabled: boolean;
   readonly fontSize: number | null;
   readonly spoken: string;
+  /** 九键数字键的角标字母组（如 "abc"）；其余布局为 null。 */
+  sublabel: string | null = null;
 
   constructor(action: KeyAction, label: string, icon: KeyIcon | null = null,
     style: KeyStyle = KeyStyle.CHARACTER, alternates: string[] = [], preview: boolean = true,
@@ -318,7 +320,57 @@ export class KeyBuilder {
     const chinese = !context.english && context.mode !== InputMode.JAPANESE;
     if (context.page > 0) return KeyBuilder.symbols(context, context.page, chinese, t);
     if (!context.english && context.mode === InputMode.ZHUYIN) return KeyBuilder.zhuyinSet(context, t);
+    // 九键拼音：3×4 数字键盘（2-9 每键标字母），T9 组字在引擎侧（T9.ets）。
+    if (!context.english && context.mode === InputMode.PINYIN9) return KeyBuilder.nineKeySet(context, t);
     return KeyBuilder.letters(context, t);
+  }
+
+  /** 九键 3×4 布局：每键主标数字、角标字母组（标准九键，对照 iOS 九键）。 */
+  private static nineKeySet(context: KeyContext, t: Words): KeySet {
+    const layout: string[][] = [
+      ['1', ''], ['2', 'abc'], ['3', 'def'],
+      ['4', 'ghi'], ['5', 'jkl'], ['6', 'mno'],
+      ['7', 'pqrs'], ['8', 'tuv'], ['9', 'wxyz'],
+    ];
+    const rows: Key[][] = [];
+    for (let r = 0; r < 3; r++) {
+      const row: Key[] = [];
+      for (let c = 0; c < 3; c++) {
+        const def = layout[r * 3 + c];
+        if (def[0] === '1') {
+          // 「1」键：标点备选（长按出 ,?! 等；点击上屏最常用句号——对照 iOS）。
+          row.push(new Key(new KeyActionText('。'), '1', null, KeyStyle.CHARACTER,
+            ['，', '、', '？', '！', '…', '；', '：', '“', '”', '‘', '’'], true, true, 28, '标点'));
+        } else {
+          row.push(KeyBuilder.nineKey(def, t));
+        }
+      }
+      rows.push(row);
+    }
+    // 行 3: 标准底行（符号/切换/空格/换行）
+    const symbolsKey = new Key(new KeyActionPage(1), t.pick('符號', '符号'), null, KeyStyle.UTILITY, [], false, true, 16, t.pick('符號', '符号'));
+    const bottom = KeyBuilder.bottomRow(context, t, symbolsKey, KeyBuilder.toggleKey(context));
+    const keyRows: Key[][] = [];
+    keyRows.push(rows[0]);
+    keyRows.push(rows[1]);
+    keyRows.push(rows[2]);
+    keyRows.push(bottom.keys);
+    const specs: RowSpec[] = [];
+    specs.push(new RowSpec(arrayOfFill(3, 1), RowAlignment.CENTERED));
+    specs.push(new RowSpec(arrayOfFill(3, 1), RowAlignment.CENTERED));
+    specs.push(new RowSpec(arrayOfFill(3, 1), RowAlignment.CENTERED));
+    specs.push(bottom.spec);
+    return new KeySet(keyRows, specs, 3);
+  }
+
+  /** 造一个九键数字键：主标数字，角标字母（副文本）。 */
+  private static nineKey(def: string[], t: Words): Key {
+    const digit = def[0];
+    const letters = def[1];
+    const key = new Key(new KeyActionEngine(digit.charCodeAt(0)), digit, null,
+      KeyStyle.CHARACTER, [], false, true, 28, `拼音九键 ${digit}`);
+    key.sublabel = letters;
+    return key;
   }
 
   private static bottomRow(context: KeyContext, t: Words, first: Key, second: Key | null): BottomRowResult {

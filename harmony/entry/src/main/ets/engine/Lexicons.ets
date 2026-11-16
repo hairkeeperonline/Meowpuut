@@ -15,6 +15,8 @@ export class Lexicons {
   private context: common.Context;
   private lexicon: number = 0;
   private session: number = 0;
+  /** 九键 T9 查询用 shadow 会话（同一词库第二个 session）。 */
+  private t9Shadow: number = 0;
   private loadedPinyin: boolean | null = null;
   private generation: number = 0;
   private _japanese: JapaneseWords = JapaneseWords.EMPTY;
@@ -37,7 +39,8 @@ export class Lexicons {
       if (token === this.generation) ready(0);
       return;
     }
-    const pinyin = mode === InputMode.PINYIN;
+    // 九键拼音（PINYIN9）与全键拼音共用拼音词库（T9 组合在 ArkTS 侧展开成字母序列）。
+    const pinyin = mode === InputMode.PINYIN || mode === InputMode.PINYIN9;
     if (this.session !== 0 && this.loadedPinyin === pinyin) {
       ready(this.session);
       return;
@@ -84,15 +87,28 @@ export class Lexicons {
     this.lexicon = lex;
     this.session = newSession;
     this.loadedPinyin = lex !== 0 ? pinyin : null;
+    // 九键 shadow：同一词库再开一个查询专用 session（sessionCreate 多开安全，Arc 共享）。
+    if (lex !== 0 && pinyin) {
+      this.t9Shadow = NativeEngine.sessionCreate(lex);
+    } else {
+      this.t9Shadow = 0;
+    }
     ready(newSession);
   }
 
   release(): void {
     if (this.session !== 0) NativeEngine.sessionDestroy(this.session);
+    if (this.t9Shadow !== 0) NativeEngine.sessionDestroy(this.t9Shadow);
     if (this.lexicon !== 0) NativeEngine.lexiconDestroy(this.lexicon);
     this.session = 0;
+    this.t9Shadow = 0;
     this.lexicon = 0;
     this.loadedPinyin = null;
+  }
+
+  /** 九键 T9 查询会话（无则 0）。 */
+  t9Session(): number {
+    return this.t9Shadow;
   }
 
   shutdown(): void {

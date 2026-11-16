@@ -16,6 +16,13 @@
     },
     {
       "icon": "$media:icon",
+      "id": "MeowpuutPinyin9",
+      "label": "$string:ime_label_pinyin9",
+      "locale": "zh-CN",
+      "mode": "lower"
+    },
+    {
+      "icon": "$media:icon",
       "id": "MeowpuutJapanese",
       "label": "$string:ime_label",
       "locale": "ja-JP",

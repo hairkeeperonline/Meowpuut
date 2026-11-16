@@ -440,10 +440,10 @@ struct SettingsPage {
                   this.prefs.mode = this.mode;
                   // 通过系统子类型切换通知输入法进程（跨进程 preferences 不互通，
                   // 但 switchCurrentInputMethodSubtype 会触发 setSubtype 回调）。
-                  // 九键拼音（index 2）T9 引擎/3×4 键盘暂未实现，subtype 暂映射到 Pinyin、
-                  // 引擎降级到全键拼音（见 PARITY round 56）。
+                  // 九键拼音（index 2）：T9 纯 ArkTS 实现（T9.ets 数字→音节切分→
+                  // 影子会话重放），subtype 走 Pinyin9（加载拼音词库，见 PARITY round 57）。
                   const subtypeId = index === 0 ? 'MeowpuutZhuyin'
-                    : (index === 1 || index === 2) ? 'MeowpuutPinyin' : 'MeowpuutJapanese';
+                    : index === 1 ? 'MeowpuutPinyin' : index === 2 ? 'MeowpuutPinyin9' : 'MeowpuutJapanese';
                   // name 必须是 bundle 名（系统注册时就是这么填的），
                   // 填成 subtypeId 会导致切换被拒绝、IME 收到 id=undefined。
                   const subtype: InputMethodSubtype = {
