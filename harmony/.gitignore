@@ -30,4 +30,4 @@ sign-config.json5
 
 # Local SDK / toolchain paths
 local.properties
-**/local.properties
+**/local.propertiessigcheck2/
