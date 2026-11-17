@@ -962,9 +962,11 @@ export struct MeowpuutKeyboard {
         .onAxisEvent((event: AxisEvent) => {
           this.handleBarWheel(event);
         })
-        // 【round 65 ②】候选栏整体语义（逐项候选朗读在展开面板的虚拟节点里）。
+        // 【真机反馈 ②】读屏点候选词不念具体词汇：accessibilityText 从写死的
+        // 「喵扑输入键盘候选栏」改为动态拼接当前候选/联想词，读屏至少能念出内容。
+        // 后续可加逐候选虚拟节点实现逐个点选。
         .accessibilityGroup(true)
-        .accessibilityText('喵扑输入键盘候选栏')
+        .accessibilityText(this.candidatesSpoken())
 
       // 键盘按键：用 layoutWeight 撑满候选栏之外的剩余空间，
       // 否则固定键高会在面板底部留一条点不到的死区。
@@ -1020,6 +1022,10 @@ export struct MeowpuutKeyboard {
         .onActionUpdate((event: GestureEvent) => {
           if (this.pullDownFired || this.state.expanded) return;
           if (this.touches !== null && this.touches.anyPointerOnKey()) return;
+          // 【真机反馈 ⑥】候选行有自己的下拉收起判定（barMove: dy>64 且纵向占优
+          // 才收起），根手势不再重复判定——否则横向拖动候选时轻微的纵向分量也会
+          // 被根手势当成下拉，误触收起。barDragId >= 0 = 触点在候选行上。
+          if (this.barDragId >= 0) return;
           if (event.offsetY > 56) {
             this.pullDownFired = true;
             this.onHideEvt?.();
@@ -1168,23 +1174,33 @@ export struct MeowpuutKeyboard {
 
   /** 鼠标 hover：按键描边高亮（移出/展开面板态清除）。 */
   private handleKeyHover(isHover: boolean, event: HoverEvent): void {
+    // 【真机反馈 ④】onHover 只在进出组件边界时各触发一次；组件内部的持续移动
+    // 由 onMouse 的 MouseAction.Hover（值 3）驱动 trackHover。这里只处理边界：
+    // 进入时定位一次，离开时清除。
+    if (!isHover) {
+      this.trackHover(-1, -1);
+      return;
+    }
+    const x = event.x;
+    const y = event.y;
+    if (x !== undefined && y !== undefined) this.trackHover(x, y);
+  }
+
+  /** 按坐标更新 hover 高亮（onHover 进出 + onMouse Hover 移动共用）。 */
+  private trackHover(x: number, y: number): void {
     let row = -1;
     let col = -1;
-    if (isHover && !this.mouseAltActive && !(this.state.expanded && this.state.composing)) {
-      const x = event.x;
-      const y = event.y;
-      if (x !== undefined && y !== undefined) {
-        const hit = this.keyPlacementAt(x, y);
-        if (hit !== null) {
-          row = hit[0];
-          col = hit[1];
-          let key: Key | undefined = undefined;
-          if (this.keySet !== null && col >= 0) {
-            const rowKeys = this.keySet.rows[row];
-            if (rowKeys !== undefined) key = rowKeys[col];
-          }
-          if (key === undefined || !key.enabled) { row = -1; col = -1; }
+    if (!this.mouseAltActive && !(this.state.expanded && this.state.composing)) {
+      const hit = this.keyPlacementAt(x, y);
+      if (hit !== null) {
+        row = hit[0];
+        col = hit[1];
+        let key: Key | undefined = undefined;
+        if (this.keySet !== null && col >= 0) {
+          const rowKeys = this.keySet.rows[row];
+          if (rowKeys !== undefined) key = rowKeys[col];
         }
+        if (key === undefined || !key.enabled) { row = -1; col = -1; }
       }
     }
     if (row === this.hoverRow && col === this.hoverCol) return;
@@ -1196,7 +1212,17 @@ export struct MeowpuutKeyboard {
 
   /** 鼠标按键：右键弹备选条；左键在条打开时选择/关闭（onTouch 路径同语义兜底）。 */
   private handleKeyMouse(event: MouseEvent): void {
+    // 【真机反馈 ④】MouseAction.Hover（值 3）= 鼠标在组件内移动（无按键按下）。
+    // onHover 只在进出组件时各触发一次，组件内部的持续移动完全依赖这里的 Hover
+    // action。此前未处理，导致只有第一次进入时的那个键有描边、后续都不亮。
+    if (event.action === MouseAction.Hover) {
+      this.trackHover(event.x, event.y);
+      return;
+    }
     if (event.action === MouseAction.Press && event.button === MouseButton.Right) {
+      // 【真机反馈 ⑧】右键无反应——加日志定位（hit/options/enabled 各分支）。
+      hilog.info(0x0000, 'MeowpuutMouse',
+        `rightPress x=${event.x} y=${event.y} button=${event.button}`);
       this.openMouseAlternates(event.x, event.y);
       return;
     }
@@ -1261,7 +1287,11 @@ export struct MeowpuutKeyboard {
     if (this.alternates !== null) return;
     if (this.state.expanded && this.state.composing) return;
     const hit = this.keyPlacementAt(x, y);
-    if (hit === null) return;
+    // 【真机反馈 ⑧】右键无反应：在每个提前返回的分支写日志，真机一跑就能定位。
+    if (hit === null) {
+      hilog.info(0x0000, 'MeowpuutMouse', `openAlt: no hit at (${x},${y})`);
+      return;
+    }
     const row = hit[0];
     const col = hit[1];
     if (col < 0 || this.keySet === null) return;
@@ -1270,9 +1300,16 @@ export struct MeowpuutKeyboard {
     if (rowKeys === undefined || rowPlaces === undefined) return;
     const key = rowKeys[col];
     const place = rowPlaces[col];
-    if (key === undefined || place === undefined || !key.enabled) return;
+    if (key === undefined || place === undefined || !key.enabled) {
+      hilog.info(0x0000, 'MeowpuutMouse', `openAlt: key disabled r=${row} c=${col}`);
+      return;
+    }
     const options = key.alternates;
-    if (options.length === 0) return;
+    if (options.length === 0) {
+      hilog.info(0x0000, 'MeowpuutMouse', `openAlt: key '${key.label}' has no alternates`);
+      return;
+    }
+    hilog.info(0x0000, 'MeowpuutMouse', `openAlt: opening for '${key.label}' n=${options.length}`);
     const strip = AlternatesStrip.fromKey(place.frame, options.length, this.kbWidth);
     this.alternates = new AlternatesState(strip, options, strip.indexAt(boxCenterX(place.frame)));
     this.mouseAltActive = true;
@@ -1347,6 +1384,68 @@ export struct MeowpuutKeyboard {
    */
   private static readonly WHEEL_DIRECTION = 1;
 
+  /** 候选栏读屏文本：动态拼接当前候选/联想词（真机反馈 ②）。 */
+  private candidatesSpoken(): string {
+    const st = this.state;
+    if (st.candidates.length > 0) {
+      const words: string[] = [];
+      for (let i = 0; i < Math.min(5, st.candidates.length); i++) {
+        const c = st.candidates[i];
+        if (c !== undefined) words.push(c.text);
+      }
+      if (words.length > 0) return `候选：${words.join('，')}`;
+    } else if (st.predictions.length > 0) {
+      return `联想：${st.predictions.slice(0, 5).join('，')}`;
+    }
+    return '喵扑输入键盘候选栏';
+  }
+
+  // ---------------- 滚轮平滑滚动（真机反馈 ⑥⑦：跳变无动画） ----------------
+
+  /** 滚轮动画代数计数器：触摸/重定向时 +1 取消旧动画。 */
+  private barScrollAnimGen: number = 0;
+  private panelScrollAnimGen: number = 0;
+  private barScrollTarget: number = 0;
+  private panelScrollTarget: number = 0;
+
+  /** 候选栏滚轮 → 平滑动画到目标位置（~150ms ease-out）。 */
+  private animateBarScrollTo(target: number): void {
+    this.barScrollTarget = target;
+    const gen = ++this.barScrollAnimGen;
+    const step = () => {
+      if (this.barScrollAnimGen !== gen) return; // 已被新动画/触摸取消
+      const diff = this.barScrollTarget - this.barScroll;
+      if (Math.abs(diff) <= 0.5) {
+        this.barScroll = this.barScrollTarget;
+        this.drawTick++;
+        return;
+      }
+      this.barScroll += diff * 0.3;
+      this.drawTick++;
+      setTimeout(step, 16);
+    };
+    setTimeout(step, 16);
+  }
+
+  /** 展开面板滚轮 → 平滑动画到目标位置。 */
+  private animatePanelScrollTo(target: number): void {
+    this.panelScrollTarget = target;
+    const gen = ++this.panelScrollAnimGen;
+    const step = () => {
+      if (this.panelScrollAnimGen !== gen) return;
+      const diff = this.panelScrollTarget - this.panelScroll;
+      if (Math.abs(diff) <= 0.5) {
+        this.panelScroll = this.panelScrollTarget;
+        this.drawTick++;
+        return;
+      }
+      this.panelScroll += diff * 0.3;
+      this.drawTick++;
+      setTimeout(step, 16);
+    };
+    setTimeout(step, 16);
+  }
+
   /** 键区滚轮：展开面板态纵向滚候选格；常态不打扰按键（不透传候选栏）。 */
   private handleKeyWheel(event: AxisEvent): void {
     const dy = MeowpuutKeyboard.axisDelta(event);
@@ -1354,8 +1453,7 @@ export struct MeowpuutKeyboard {
     if (this.state.expanded && this.state.composing) {
       const next = Math.max(0, Math.min(this.panelMaxScroll(), this.panelScroll + dy));
       if (next !== this.panelScroll) {
-        this.panelScroll = next;
-        this.drawTick++;
+        this.animatePanelScrollTo(next);
       }
     }
   }
@@ -1371,8 +1469,7 @@ export struct MeowpuutKeyboard {
     if (dy === 0) return;
     const next = Math.max(0, Math.min(this.barMaxScroll, this.barScroll + dy));
     if (next !== this.barScroll) {
-      this.barScroll = next;
-      this.drawTick++;
+      this.animateBarScrollTo(next);
     }
   }
 
@@ -1503,6 +1600,8 @@ export struct MeowpuutKeyboard {
    */
   private barPress(id: number, x: number, y: number): void {
     this.barFlingStop();
+    // 【真机反馈 ⑥】手指按上候选行时取消滚轮动画，避免动画和拖动互相拉扯。
+    this.barScrollAnimGen++;
     this.barDragId = id;
     this.barDownX = x;
     this.barDownY = y;
