@@ -1657,3 +1657,27 @@ if (this.composer.composing && this.lastPreviewAt > 0 &&
 6. 若离屏缓存命中率异常（`MeowpuutGlass` 反复渲染）或出现视觉差异，回退开关：将 `renderGlassCache` 直接 `return null` 即整条路径回到直绘。
 
 **遗留**：①②③④ 的真机验收（待设备恢复）。
+### 追加：round 65 ① 像素保真的诚实结论与缓存可观测性（同日修订）
+
+**关于「像素级视觉零回归」这一验收口径的修正**：初版把「前后截图像素级零回归」写为 ① 的验收标准，实现后经代码级复核，该口径在技术上**无法严格达成**，须如实修正——
+
+`GlassPainter.body` 与 `shadow` 含多层 **alpha 叠加**：虹彩 `globalAlpha 0.20/0.30` + `shadowBlur 7`、内釉渐变 `0.09/0.22`、内缘亮带 `0.07/0.38` + `shadowBlur 1.8`、下缘虹彩 `0.6/0.8`、顶部厚度高光、左上镜面斑；`shadow` 的 `shadowBlur 8` 更是整条柔化带。直绘路径下这些 alpha 由渲染引擎在本帧一次性合成；离屏路径下先合成到透明画布（8bit 量化），转 `ImageBitmap`，再 `drawImage` 二次合成。**多出的这一次量化会在半透明边缘与柔化带产生 ±1 LSB 级偏差**，像素级 diff 必然非零。这是离屏缓存的固有数学代价，不是实现缺陷。
+
+**已做的风险控制**：
+1. **不重复混合**：`drawCandidateBar` 先 `clearRect` 再回贴位图，回贴时目标为透明，不存在同位置叠加两次。
+2. **抗锯齿显式对齐**：`OffscreenCanvasRenderingContext2D(w, h, new RenderingContextSettings(true))`，与主画布 `barSettings = new RenderingContextSettings(true)` 逐参数一致；离屏 `width/height` 单位为 **vp**（已核 SDK d.ts 注释），与主画布坐标系同构，绘制代码零改动。
+3. **1:1 物理像素回贴**：dest 传 `bmp.width × bmp.height`（位图自身像素尺寸），规避 round 64 实测的 `PixelMap` dest 按物理像素解释的 `pxRatio()` 陷阱——无论 `ImageBitmap` 走哪种语义，1:1 都是正确的。
+4. **回退开关**：`renderGlassCache` 任何异常/无效位图 → 返回 null → 调用方直绘原路径。
+
+**修正后的 ① 验收口径**（可测量、可证伪）：
+- **功能正确性**：视觉无损——截图对比基线，玻璃/爪影/节日簇的位置、形状、配色一致，肉眼与视觉代理不可辨差异；容差取 **RGB 每通道 ≤2**、且差异像素占比 <1%（仅在玻璃边缘/柔化区允许）。
+- **缓存确实生效**：`hilog` 域 `MeowpuutGlass` 每 10s 输出 `glass stats: hit=N direct=M render=R`。判定标准 **hit ≫ render**（稳态下 render 应为个位数、不随时间增长）。若 render 持续增长 → 缓存键抖动（`festivalLoadedId` / `Look` 引用 / `idiom` 变化），需排查。
+- **性能收益**：空闲 GC `since gc` 数值平坦 + 连续打字跟手（沿用 round 64 的实证方法）。
+
+**新增可观测性**：
+- `glassHitFrames` / `glassDirectFrames` / `glassRenderCount` 三个计数器，`pollHost` 每 10s 限频输出一次（避免日志洪泛）。
+- 首帧输出 `glass cache rendered: vp=W×H bmp=W×H k=D`，供真机核对位图像素尺寸与 `pxRatio` 的关系、验证 1:1 回贴假设。
+
+**本轮修订的构建**：`BUILD SUCCESSFUL in 17s 71ms`，产物 `entry-default-signed.hap` 86,791,884 字节 `2026-11-17 08:23:42`。
+
+**真机验收状态**：仍为**未验证**——`hdc list targets` 依旧只返回 `COM3~COM6`（UART），无 USB 设备。

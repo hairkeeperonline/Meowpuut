@@ -376,6 +376,11 @@ export struct MeowpuutKeyboard {
   private glassCacheW: number = -1;
   private glassCacheH: number = -1;
   private glassCacheLogged: boolean = false;
+  /** 【round 65 ①】缓存命中/未命中帧计数（hilog 定期输出，真机据此判定缓存是否真的生效）。 */
+  private glassHitFrames: number = 0;
+  private glassDirectFrames: number = 0;
+  private glassRenderCount: number = 0;
+  private lastGlassLogAt: number = 0;
 
   // ------------------------------------------------------------------
   // 【round 65 ④】鼠标：hover 高亮 / 右键备选条 / 滚轮。
@@ -571,6 +576,17 @@ export struct MeowpuutKeyboard {
         const a = host.takeAnnounce();
         this.lastAnnounceToken = a.token;
         this.announce(a.text);
+      }
+      // 【round 65 ①】缓存效率快照：每 10s 输出一次命中/直绘/重渲染计数，
+      // 真机据此判定离屏缓存是否真的生效（命中率应≫重渲染数；若 render 持续
+      // 增长说明缓存键不稳定，需排查 festivalLoadedId/Look 引用抖动）。
+      if (this.glassHitFrames > 0 || this.glassDirectFrames > 0) {
+        const nowMs = Date.now();
+        if (nowMs - this.lastGlassLogAt >= 10000) {
+          this.lastGlassLogAt = nowMs;
+          hilog.info(0x0000, 'MeowpuutGlass',
+            `glass stats: hit=${this.glassHitFrames} direct=${this.glassDirectFrames} render=${this.glassRenderCount}`);
+        }
       }
       // 持续推进 lean 动画与粒子，并让活跃中的短动画持续重绘。
       this.stepLean();
@@ -1628,8 +1644,17 @@ export struct MeowpuutKeyboard {
     }
     if (bmp !== null) {
       // dest 宽高传位图自身像素尺寸 = 1:1 物理像素回贴（位置仍按 vp 语义 (0,0)）。
+      // 【像素保真说明】静态层含多层 alpha 叠加（虹彩/釉面/镜面斑）与 shadowBlur
+      // 柔化：离屏预合成后再回贴，严格意义上比直绘多一次 alpha 量化，边缘像素可能
+      // 有 ±1 LSB 偏差——这是离屏缓存的固有代价，非缺陷。绘制顺序保证不重复混合
+      // （上方已 clearRect，回贴前画布透明）。
+      ctx.save();
+      ctx.imageSmoothingEnabled = true;
       ctx.drawImage(bmp, 0, 0, bmp.width, bmp.height);
+      ctx.restore();
+      this.glassHitFrames++;
     } else {
+      this.glassDirectFrames++;
       // 离屏路径异常时回退直绘（保视觉永不丢；hilog 已在 renderGlassCache 里告警）。
       GlassPainter.shadow(ctx, look.shape, region.glass, look.dark);
       GlassPainter.body(ctx, look.shape, region.glass, look);
@@ -1677,6 +1702,8 @@ export struct MeowpuutKeyboard {
     try {
       let off = this.glassCacheCtx;
       if (off === null || this.glassCacheW !== w || this.glassCacheH !== h) {
+        // 抗锯齿必须与主画布一致（barSettings = new RenderingContextSettings(true)），
+        // 否则边缘像素的抗锯齿结果不同，回贴后视觉对不上。
         off = new OffscreenCanvasRenderingContext2D(w, h, new RenderingContextSettings(true));
         this.glassCacheCtx = off;
         this.glassCacheW = w;
@@ -1693,6 +1720,7 @@ export struct MeowpuutKeyboard {
       }
       const bmp = off.transferToImageBitmap();
       if (bmp === null || bmp === undefined || bmp.width <= 0 || bmp.height <= 0) return null;
+      this.glassRenderCount++;
       return bmp;
     } catch (e) {
       const err = e as BusinessError;
