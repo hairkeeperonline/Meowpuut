@@ -24,3 +24,4 @@ Meowpuut-Core/
 # 本机构建工具修复目录与临时备份（另一 AI 留下）：不进 git
 .tools/
 .tmp/
+sigcheck2/
