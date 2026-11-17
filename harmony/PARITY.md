@@ -1730,3 +1730,17 @@ SDK 原文（`common.d.ts`）对 `'yes'` 的定义恰好覆盖本场景：「The
 - `idiom` 只在 `rebuild()` 更新，已纳入缓存键 ✓。
 
 **构建**：`BUILD SUCCESSFUL in 19s 389ms`。仍为静态验证，真机未验。
+### 追加：round 65 ④ 三个交互缺陷（右键关不掉 / 双击事件双重投递 / 左键打字丢失）
+
+**缺陷 G（④，右键关不掉自己）**：`openMouseAlternates` 初版在「备选条已开着」时先调 `resolveMouseAlternates(-1,-1)` 关闭，**然后继续往下执行打开逻辑**——同一个右键 Press 把刚关掉的条又按刚关时的落点重新打开（若仍落在同一键上）。用户观感是「右键点了没反应，条一直挂着」。**修复**：已开着时只关闭并 `return`，不落到打开分支。
+
+**缺陷 H（④，鼠标事件双重投递）**：`SourceType` 枚举中存在 `Mouse` 成员——说明**鼠标按压会同时投递 `onMouse(Press)` 与 `onTouch(Down)`**。两处都响应时右键会开/关两次、左键会重复按下。**修复**：`handleKeysTouch` 顶部 `if (event.source === SourceType.Mouse) return;`，鼠标交互统一归 `onMouse/onHover/onAxisEvent`。
+
+**缺陷 I（④，修复 H 时立即暴露的连带问题）**：H 把鼠标来源的触点全部挡在 `onTouch` 之外，而键区按键原本**只**由 `onTouch` 驱动 `KeyTouches`——于是**鼠标左键直接失去打字能力**（悬停高亮和右键还能用，点键没反应）。这是修复 H 制造的回归，必须同时补上。**修复**：在 `handleKeyMouse` 里用固定的 `mousePointerId = 0` 驱动**同一个 `KeyTouches` 状态机**：
+- `Press` → `touches.down(...)`、`Release` → `touches.up(...)`、`Move` → `touches.move(...)`
+- 复用同一状态机的收益：鼠标点键与手指点键走**完全相同的提交/长按备选/删除连发/滑选手感**逻辑，不产生第二套语义。
+- `KeyTouches.down()` 内部按 id 查重、`up()` 找不到指针时安全返回，鼠标事件乱序（无 Down 先来 Move）不会崩。
+
+**构建**：`BUILD SUCCESSFUL in 20s 256ms`。仍为静态验证。
+
+**待真机确认的风险点**：`SourceType.Mouse` 过滤是否过宽——若某些触屏设备把手指也报为 `Mouse`/`Unknown`，会导致手指完全失灵。真机验收时必须先验证**手指正常打字**，再验证鼠标；若手指失灵，立刻把 `handleKeysTouch` 的过滤条件收窄为「仅过滤右键」（用 `MouseEvent.button` 而非 `source` 区分）。

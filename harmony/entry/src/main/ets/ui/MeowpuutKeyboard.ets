@@ -391,6 +391,8 @@ export struct MeowpuutKeyboard {
   /** 鼠标右键打开的备选条是否活跃（活跃期间左键点击只用于选择/关闭，不进按键触控）。 */
   private mouseAltActive: boolean = false;
   private mouseAltKey: Key | null = null;
+  /** 鼠标只有一个指针，用固定 id 驱动 KeyTouches（避免与手指 id 混用）。 */
+  private mousePointerId: number = 0;
 
   // ------------------------------------------------------------------
   // 【round 65 ②】逐键无障碍虚拟节点（@State 驱动 accessibilityVirtualNode 的 ForEach）。
@@ -1105,6 +1107,12 @@ export struct MeowpuutKeyboard {
   private handleKeysTouch(event: TouchEvent): void {
     if (this.touches === null) return;
     // 【round 65 ④】鼠标右键备选条打开期间：触点/左键全部转为备选条的
+    // 【round 65 ④ 修正】鼠标来源的触点不在这里处理：SOURCE_TYPE=Mouse 的按压会
+    // **同时**投递 onMouse(Press) 与 onTouch(Down)（SourceType.Mouse 枚举即为此而设），
+    // 若两处都响应，右键会开/关两次、左键会重复按下。鼠标交互统一交给 onMouse /
+    // onHover / onAxisEvent；这里只处理真正的手指/触屏来源。展开面板的鼠标单击已在
+    // onMouse 里通过 resolveMouseAlternates 处理。
+    if (event.source === SourceType.Mouse) return;
     // 选择/关闭语义，不进按键状态机（否则条下方的键会被误提交）。
     if (this.mouseAltActive) {
       for (const change of event.changedTouches) {
@@ -1192,20 +1200,45 @@ export struct MeowpuutKeyboard {
       this.openMouseAlternates(event.x, event.y);
       return;
     }
+    // 左键：备选条开着时只用于选择/关闭。
     if (event.action === MouseAction.Press && event.button === MouseButton.Left &&
       this.mouseAltActive) {
       this.resolveMouseAlternates(event.x, event.y);
+      return;
+    }
+    // 【round 65 ④ 修正】鼠标来源的触点已在 handleKeysTouch 中被排除（避免与 onMouse
+    // 重复触发），所以左键的正常打字必须在这里补回来——按 Press/Release 驱动同一个
+    // KeyTouches 状态机，保证鼠标点键与手指点键走完全相同的提交/长按/删除重复逻辑。
+    if (event.button !== MouseButton.Left) return;
+    if (event.action === MouseAction.Press) {
+      if (this.touches === null) return;
+      // 鼠标只有一个指针，固定用 0 号 id；与手指 id 不冲突（手指从 1 起不保证，
+      // 但按下时另一来源不会同时存在于按键区）。
+      this.mousePointerId = 0;
+      this.touches.down(this.mousePointerId, event.x, event.y);
+    } else if (event.action === MouseAction.Release) {
+      if (this.touches === null) return;
+      this.touches.up(this.mousePointerId, event.x, event.y);
+    } else if (event.action === MouseAction.Move) {
+      // 按住拖动（拖到删除键连续删除、滑选备选）与手指语义一致：一律转给状态机，
+      // 由 KeyTouches 自己决定「按住是删除重复还是滑选备选」。
+      if (this.touches === null) return;
+      this.touches.move(this.mousePointerId, event.x, event.y);
     }
   }
 
   /** 右键 = 直接弹长按备选气泡条（对照 KeyTouches.showAlternates 的产物）。 */
   private openMouseAlternates(x: number, y: number): void {
     if (this.mouseAltActive) {
-      // 已开着：右键再点视为关闭/切换（先关再尝试开新键）。
+      // 【round 65 ④ 修正】备选条已开着：本次右键**只负责关闭**，不再往下走去开新的。
+      // 初版这里先 resolve 关闭、再继续执行下方的打开逻辑，等于「点了关闭又被同一次
+      // 点击重新打开」——用户看到的是右键没反应（条一直在）。关闭语义就是关闭。
       this.resolveMouseAlternates(-1, -1);
+      return;
     }
+    // 触控长按弹出的备选条正在显示：鼠标右键不与它抢，避免两条同时存在。
+    if (this.alternates !== null) return;
     if (this.state.expanded && this.state.composing) return;
-    if (this.alternates !== null) return; // 触控长按的备选条在显示中，不打架
     const hit = this.keyPlacementAt(x, y);
     if (hit === null) return;
     const row = hit[0];
