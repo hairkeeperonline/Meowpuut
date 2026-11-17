@@ -1902,3 +1902,46 @@ MeowpuutGlass  glass stats: hit=N direct=M render=R
 5. 若 `dumpLayout` 里**完全没有**这些节点，则说明 `accessibilityVirtualNode` 的占位组件未被 a11y 树接纳（缺陷 F 的 `accessibilityLevel('yes')` 未生效），此时 ② 判定为**未达成**，需要改用其他方案（如 `Stack` 叠加真实透明组件）。
 
 第 5 条是目前 ② 最大的不确定点：**仿真证明了「如果我生成了正确的节点」，但证明不了「ArkUI 会把它们交给读屏」**。这一条只有真机能回答。
+### 追加：round 65 ④ 鼠标事件路由仿真（48 项断言全过）+ 四套仿真总览
+
+`harmony/tools/sim-mouse.mjs`（`node tools/sim-mouse.mjs`，全过退出码 0）把 `handleKeyMouse` / `handleKeysTouch` 的鼠标守卫 / `openMouseAlternates` / `hoverMouseAlternates` / `resolveMouseAlternates` / `axisDelta` 移植到 Node。
+
+| # | 场景 | 结论 |
+| --- | --- | --- |
+| 1 | 缺陷 H | 鼠标按压同时来的 `onTouch` 被拦下，状态机**只收到一次 down/up** |
+| 2 | 缺陷 I | 鼠标左键**仍能打字**，固定 `mousePointerId=0`，坐标透传 |
+| 3 | 手指来源 | `TouchScreen`/`Unknown` 正常进 FSM |
+| 4 | 缺陷 G | 右键开→右键**关**；一次右键只触发一次重绘 |
+| 5–7 | 无备选/禁用键/落在画布外 | 均不弹条 |
+| 8 | 缺陷 K | 条上移动高亮跟随，条外移动不改高亮 |
+| 9–10 | 左键点条内/条外 | 条内提交正确选项；条外只关闭不提交 |
+| 11 | 触控长按条在场 | 鼠标右键**不抢**，原触控条不被替换 |
+| 12 | 展开组字态 | 右键不弹条 |
+| 13 | 中键 | 不进状态机、不激活备选 |
+| 14 | 缺陷 J | `vp 0.5→24`、`scrollStep 1→48`（不再多乘 3.2 倍）、vp 优先 |
+| 15 | 完整序列 | 右键→移动→左键后三个状态字段全部复位，随后左键恢复打字 |
+| 16 | 贴边键 | 备选条被夹在画布内，不越界 |
+
+**缺陷 G 附反证**：把 `openMouseAlternates` 换回「先关再往下走」的旧写法，第二次右键后 `mouseAltActive` 仍为 **true**——证实缺陷 G 真实存在。
+
+---
+
+### Round 65 四套离线仿真总览
+
+| 脚本 | 覆盖项 | 断言数 | 结果 |
+| --- | --- | --- | --- |
+| `tools/sim-geometry.mjs` | 命中测试几何 + ① 候选格坐标 | 30.8 万采样点 + 12 项断言 | 全过 |
+| `tools/sim-shift.mjs` | ③ 物理 Shift / CapsLock 状态机 | 30 | 全过 |
+| `tools/sim-glass-cache.mjs` | ① 缓存键 / 失效 / 位图生命周期 | 47 | 全过 |
+| `tools/sim-a11y.mjs` | ② 逐键节点生成 / 展开裁剪 / 签名 | 33 | 全过 |
+| `tools/sim-mouse.mjs` | ④ 鼠标事件路由 | 48 | 全过 |
+
+合计 **170 项断言 + 30.8 万采样点**。每个脚本都至少含一处**反证**（旧实现在同一断言下失败），用于证明对应的缺陷不是臆测。
+
+**四套仿真共同改变了真机验收口径**：
+- ① 判据从「hit 非零」改为 **`render << hit`**（退化实现里 hit 照样增长）；
+- ② 从「出现节点」细化为 5 条可断言属性，含**滚动一格后候选格 bounds 应整体下移一格高度**；
+- ③ 明确软键盘与物理 Shift **语义不同**，分别断言，不强行求一致；
+- ④ 明确**先验手指打字**再验鼠标（`SourceType.Mouse` 过滤是最高风险点）。
+
+**仿真一律无法覆盖**（必须真机）：`OffscreenCanvas` 实际像素与 `transferToImageBitmap` 成果、`drawImage` 的点播语义、a11y 树是否接纳虚拟节点、鼠标/滚轮事件真实投递与符号、`KEYCODE_SHIFT` 是否到达 delegate、GC 曲线与手感。**这些恰恰是四项验收的核心，故四项仍全部未验收。**
