@@ -23,7 +23,8 @@ import { KeySounds, KeySoundKind } from '../engine/KeySounds';
 import { Prefs } from '../ui/Prefs';
 import { Look, Palette, Tone, GlassStrength, parseColor } from '../ui/Theme';
 import { GlassShape } from '../ui/GlassOutline';
-import { CandidateRegionLayout, keyMetricsOf, Idiom, resolveIdiom } from '../ui/Geometry';
+import { CandidateRegionLayout, keyMetricsOf, Idiom } from '../ui/Geometry';
+import { LayoutSolution } from '../ui/FormFactor';
 import { ShiftState, KeyContext, Key, KeyActionEngine, KeyActionText, KeyActionPage } from '../ui/Keys';
 import { Capitalization } from '../ui/KeyStates';
 import { TextUnits } from '../ui/TextUnits';
@@ -61,6 +62,7 @@ class AbilityCallbacks implements KeyboardCallbacks {
   onDragPanel(dx: number, dy: number): void { this.ability.dragPanel(dx, dy); }
   onHide(): void { this.ability.hideByPullDown(); }
   onPaste(): void { this.ability.pasteFromClipboard(); }
+  onPanelArea(widthVp: number, heightVp: number): void { this.ability.onPanelArea(widthVp, heightVp); }
 }
 
 export default class MeowpuutAbility extends InputMethodExtensionAbility {
@@ -70,6 +72,13 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
   private panel: inputMethodEngine.Panel | null = null;
   /** 最近一次面板高度（悬浮切换宽度时保持高度不变）。 */
   private lastPanelHeight: number = 0;
+  /**
+   * 【round 66 框架】面板实际窗口宽（vp）。-1 = 未知（用显示宽兜底）。
+   * 由键盘 onAreaChange → onPanelArea 回报，是断点求解的权威输入（分屏按窗口）。
+   */
+  private lastWindowWVp: number = -1;
+  /** 【round 66 框架】display change 防抖句柄（折叠开合/旋转 → 重解几何）。 */
+  private geomResyncTimer: number = -1;
 
   private prefs: Prefs = new Prefs();
   private lexicons: Lexicons | null = null;
@@ -109,6 +118,10 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
   /** 物理键盘 keyEvent 回调（实例字段保持稳定引用：onDestroy 反注册需与 on 同一函数）。 */
   private hwKeyCallback: (ev: InputKeyEvent) => boolean = (ev: InputKeyEvent): boolean => {
     return this.hardwareKeyEvent(ev);
+  };
+  /** 【round 66 框架】display change 回调（稳定引用，onDestroy 反注册配对）。 */
+  private displayChangeCallback: () => void = (): void => {
+    this.scheduleGeomResync();
   };
   /** selectionChange 回调（同上：off 反注册必须用注册时的同一引用）。 */
   private hwSelectionCallback: (oldBegin: number, oldEnd: number, newBegin: number, newEnd: number) => void =
@@ -262,6 +275,9 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     // 面板显隐跟随系统请求（官方要求的配对处理）。
     this.ability.on('keyboardShow', () => {
       hilog.info(0x0000, 'MeowpuutIME', 'keyboardShow');
+      // 【round 66 框架】每次弹出前幂等重解几何：即使 display change 在 IME 进程
+      // 不投递（文档未证实），下一次弹出也必自愈（折叠开合/旋转后的版式正确性兜底）。
+      this.resizePanel().catch(() => {});
       if (this.panel !== null) this.panel.show().catch(() => {});
     });
     this.ability.on('keyboardHide', () => {
@@ -299,6 +315,16 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
       hilog.info(0x0000, 'MeowpuutIME', 'hardware keyboard delegate registered');
     } catch (e) {
       hilog.warn(0x0000, 'MeowpuutIME', 'getKeyboardDelegate failed, no hardware keys');
+    }
+    // 【round 66 框架】显示变化（旋转/折叠开合/外接屏迁移）→ 防抖重解几何。
+    // 官方口径：布局由窗口尺寸驱动，勿用 foldStatusChange 做布局主逻辑；
+    // display change 即 IME 进程的窗口尺寸变化源。若本进程不投递该事件，
+    // keyboardShow 的幂等 resize 兜底（最坏下一次弹出换正确版式）。
+    try {
+      display.on('change', this.displayChangeCallback);
+      hilog.info(0x0000, 'MeowpuutIME', 'display change listener registered');
+    } catch (e) {
+      hilog.warn(0x0000, 'MeowpuutIME', `display.on('change') failed: ${JSON.stringify(e)}`);
     }
     this.ready = this.prefs.init(ctx).then(() => {
       hilog.info(0x0000, 'MeowpuutIME', 'prefs ready');
@@ -361,6 +387,16 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
       this.hwDelegate?.off('selectionChange', this.hwSelectionCallback);
     } catch (e) {
       // 未注册成功时 off 可能抛错，忽略。
+    }
+    // 【round 66 框架】反注册 display 监听 + 清防抖句柄。
+    try {
+      display.off('change', this.displayChangeCallback);
+    } catch (e) {
+      // 未注册成功时 off 可能抛错，忽略。
+    }
+    if (this.geomResyncTimer >= 0) {
+      clearTimeout(this.geomResyncTimer);
+      this.geomResyncTimer = -1;
     }
   }
 
@@ -550,13 +586,16 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     const disp: display.Display = display.getDefaultDisplaySync();
     const width: number = disp.width;
     const density: number = disp.densityDPI / 160;
-    const dpWidth: number = width / density;
-    // 直接用真实布局类算出候选栏高度和单行键高，避免手算常量与实现脱节。
-    // resolveIdiom 的签名是 (屏幕高度, 最小宽度)；这里键盘宽度即最小宽度。
+    const screenWVp: number = width / density;
+    // 【round 66 框架】宽度输入源=窗口宽（分屏按窗口）：页面 onAreaChange 回报的
+    // 实际宽优先，未知时用显示宽兜底（首次 resize 面板就是显示宽，二者一致）。
+    const winWVp: number = this.lastWindowWVp > 0 ? this.lastWindowWVp : screenWVp;
     const screenH: number = disp.height / density;
-    const idiom: Idiom = resolveIdiom(screenH, dpWidth);
-    const region = new CandidateRegionLayout(dpWidth, idiom, this.prefs.cats);
-    const metrics = keyMetricsOf(idiom, dpWidth, this.mode === InputMode.ZHUYIN ? 5 : 4);
+    const sol = LayoutSolution.solve(winWVp, screenH);
+    const idiom: Idiom = sol.idiom;
+    // 岛化形态按岛宽求解候选栏与键度量（与键盘侧 rebuild 同入口，几何永不脱节）。
+    const region = new CandidateRegionLayout(sol.contentW, idiom, this.prefs.cats);
+    const metrics = keyMetricsOf(idiom, sol.contentW, this.mode === InputMode.ZHUYIN ? 5 : 4);
     // 注音 5 行、其余 4 行。
     const rows: number = this.mode === InputMode.ZHUYIN ? 5 : 4;
     const keysDp: number = metrics.topPadding + rows * metrics.keyHeight +
@@ -576,10 +615,38 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
         ? this.floatingPanelHeight() : height;
       await this.panel.resize(w, h);
       hilog.info(0x0000, 'MeowpuutIME',
-        `panel resized ${width}x${height} dp=${dpHeight.toFixed(1)} (${rows}行, 候选栏${region.height.toFixed(1)})`);
+        `panel resized ${width}x${height} dp=${dpHeight.toFixed(1)} (${rows}行, 候选栏${region.height.toFixed(1)}, ` +
+        `form=${sol.form} bp=${sol.bp} win=${winWVp.toFixed(0)}vp island=${sol.contentW.toFixed(0)}@${sol.contentLeft.toFixed(0)})`);
     } catch (e) {
       hilog.error(0x0000, 'MeowpuutIME', `panel resize failed: ${JSON.stringify(e)}`);
     }
+  }
+
+  /**
+   * 【round 66 框架】面板实际窗口尺寸变化（键盘 onAreaChange 回报，vp）。
+   * 宽度与上次求解偏差 >4vp 时重解断点、重算面板高度（分屏收窄/折叠开合）。
+   * panel.resize 本身不改面板宽（宽由系统定），只追高度 → 收敛无回环。
+   */
+  onPanelArea(widthVp: number, heightVp: number): void {
+    if (widthVp <= 0) return;
+    if (Math.abs(widthVp - this.lastWindowWVp) <= 4) return;
+    this.lastWindowWVp = widthVp;
+    this.resizePanel().then(() => this.refreshKeyboard()).catch(() => {});
+  }
+
+  /**
+   * 【round 66 框架】显示变化（旋转/折叠开合/迁移外接屏）→ 防抖 200ms 重解几何。
+   * 官方口径：布局由窗口尺寸驱动（勿用 foldStatusChange 做布局主逻辑），
+   * display change 即 IME 进程的窗口尺寸变化源；键盘侧 onAreaChange 兜底。
+   */
+  private scheduleGeomResync(): void {
+    if (this.geomResyncTimer >= 0) clearTimeout(this.geomResyncTimer);
+    this.geomResyncTimer = setTimeout(() => {
+      this.geomResyncTimer = -1;
+      // 显示变了，旧窗口宽作废：先用显示宽重解，页面 onAreaChange 稍后回报校正。
+      this.lastWindowWVp = -1;
+      this.resizePanel().then(() => this.refreshKeyboard()).catch(() => {});
+    }, 200);
   }
 
   // ---------------------------------------------------------------- 提交/删除

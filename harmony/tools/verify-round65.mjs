@@ -16,6 +16,7 @@ const SUITES = [
   { file: 'sim-shift.mjs',       item: '③',     desc: '物理 Shift/CapsLock 状态机' },
   { file: 'sim-mouse.mjs',       item: '④',     desc: '鼠标 hover/滚轮/右键路由' },
   { file: 'sim-composing-cursor.mjs', item: '⑨', desc: '组字串光标定位/中退/中插' },
+  { file: 'sim-formfactor.mjs',  item: '框架',  desc: '多设备形态断点/岛宽/居中偏移（round 66）' },
 ];
 
 const results = [];

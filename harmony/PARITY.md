@@ -1976,3 +1976,39 @@ MeowpuutGlass  glass stats: hit=N direct=M render=R
 - ⑤：键盘开着切到设置页（或设置页开着弹键盘）→ 点莫莫 5 下切简繁 → 设置页「简体/繁體」行实时跟随。
 - ②：键帽白板与暗底之间有清晰明暗分界，每键投影可见——不再是整片白板。
 - ⑧：抓 `hilog | grep MeowpuutMouse` 看右键日志走到哪个分支。
+
+---
+
+### round 66：多设备形态纵向架构（框架先行，2026-11-17 用户批准方案落地）
+
+**产品边界（用户拍板）**：手表 XS 场景排除（宽度 <600vp 一律按手机档兜底）；**分屏按窗口适配**（断点输入源=窗口/面板宽 vp，非显示宽）；**PC/XL 预留暂不实现**（映射平板岛，形态位已留）。外部依据：断点区间 320/600/840/1440 对齐官方推荐值（SegmentFault《HarmonyOS 折叠屏与鸿蒙电脑适配》+ InfoQ《多端自适应实战》双源交叉证实；华为官方文档站为 JS 渲染 SPA 无法抓取正文）；官方铁律「布局由窗口尺寸驱动、勿用 foldStatusChange 做布局主逻辑」「禁止按设备型号写 if 分支」。
+
+**纵向四层**（`entry/src/main/ets/ui/FormFactor.ets`，新增形态=改 L1 表一行）：
+
+| 层 | 落点 | 职责 |
+| --- | --- | --- |
+| L1 形态注册表 | `FormSpecs`（声明式 spec：form/islandMaxW/supported/note） | 「世界上有哪些形态」：PHONE 铺满 / PHONE_LANDSCAPE 铺满 / FOLD 600vp 岛 / TABLET 640vp 岛 / TABLET_XL 预留（supported=false） |
+| L2 断点解析 | `breakpointOf(w)` + `resolveForm(w,h)` | 「当前窗口是什么形态」：高度优先（屏高<500→横屏档，横屏平板 1280×800 不误判）+ 断点（SM/MD/LG/XL） |
+| L3 布局求解 | `LayoutSolution.solve(窗口宽, 屏高)` | 「这个形态怎么摆」：contentW=min(窗口宽, 岛宽)、contentLeft=(窗口宽−岛宽)/2、Idiom 兼容映射（FOLD 新档） |
+| L4 消费方 | `MeowpuutAbility.resizePanel` + `MeowpuutKeyboard.rebuild` | 同一入口取解——面板高度与绘制/命中/a11y 几何**永不脱节** |
+
+**尺寸输入口径（刻意不对称）**：宽=窗口宽 vp（分屏敏感；键盘 onAreaChange 回报为权威，显示宽兜底）；高=整屏高 vp（横屏判定用——键盘自身高恒 <500vp 不可作判据）。
+
+**键改动清单**：
+- `Geometry.ets`：`Idiom` 增 `FOLD`；删 `resolveIdiom`（两调用点改 `LayoutSolution.solve`）；`CandidateRegionLayout` 尾参 `originX`（三盒 glass/row/chevron 平移 + `originX` 字段供右边界口径）+ FOLD 档（PHONE 同源公式，s 封顶 1.15）；`keyMetricsOf` FOLD=PHONE 同源（600/393→s 封顶 1.06，键高 45vp）；`layoutKeyGrid` 尾参 `originX`（整网格平移 + **命中区延展到岛缘**：首末键 hit 区=[originX, originX+contentW]，岛外 margin 为死区）。
+- `MeowpuutKeyboard`：`solution` 字段；rebuild/fitKeysToPanel/layoutKeyGrid/4×CandidateRegionLayout 全走解；展开面板（layoutPanel+drawPanel）同岛居中；`CatStage`/节日饰簇/裁剪区右边界=岛宽+偏移（猫落座校验在岛坐标系不破）；`onAreaChange` 回报 `onPanelAreaEvt(w,h)`。
+- `MeowpuutAbility`：`resizePanel` 走解（岛宽喂 region/度量，hilog 带 form/bp/win/island 观测）；`display.on('change')`→防抖 200ms→重解（官方窗口尺寸驱动的 IME 侧落点）；**keyboardShow 幂等 resize**（事件在本进程不投递时，下一次弹出必自愈）；`onPanelArea(w,h)`：宽度偏差>4vp 才重解（panel.resize 不改宽只追高→收敛无回环）；onDestroy 反注册。
+
+**分屏按窗口的收敛链**：系统收窄面板→onAreaChange 回报实际宽→ability 重解（断点可能降档：平板分到 500vp 窗→PHONE 版式铺满）→panel.resize 追高度→回报宽度不变→停。宽永远由系统定，我们只追高度与版式。
+
+**零回归保障**：Pura X（440vp）→SM→PHONE→岛宽=窗口、偏移=0，`layoutKeyGrid` 旧签名(5 参)==新签名(originX=0) 逐帧一致（仿真断言）；全部岛化路径在 originX=0 时无行为变化。
+
+**离线验证**：`tools/sim-formfactor.mjs`（56 断言全过）：断点阈值边界值（319/320/599/600/839/840/1439/1440）、形态判定（横屏优先/Pura X/折叠展开/平板/PC 预留/分屏降档）、岛宽数学（60/10/180/480 偏移；NaN 兜底）、layoutKeyGrid 岛偏移（帧平移精确+60、命中区延展岛缘、旧新签名零回归）、CandidateRegionLayout（FOLD 高 94、三盒平移、宽高不变）、FOLD==PHONE 度量、猫锚点不越岛、**反证**（退化实现 originX 丢失时岛内不变式必败）。verify-round65 汇总 7 套 233 断言全过。
+
+**真机验收口径**（用户手头 Pura X 440vp 无法直接验岛，岛档需 ≥600vp 设备）：
+1. Pura X 弹键盘：像素与上一版完全一致（零回归主断言）；
+2. 折叠开合/旋转后重新弹出键盘：版式/高度正确（display change 或 keyboardShow 兜底生效），hilog `panel resized ... form=... win=...` 可观测；
+3. 有平板/大屏设备时：键盘居中 640vp 岛、两侧只铺底色渐变、岛外点击无键响应、展开面板同岛居中、猫与候选玻璃不脱离岛；
+4. 分屏（如支持）：IME 面板被系统收窄时版式自动降档铺满。
+
+**已知 v1 留白**：XL（PC/2in1）真实形态策略（自动悬浮等）未做——预留位在 FormSpecs.TABLET_XL，加 `DeviceForm.PC` 时只改 L1 表+L3 映射；手表 XS 不做（产品决策）；横屏大折叠 1550×660 走 TABLET 640vp 岛（观感待 ≥600vp 真机回验）。

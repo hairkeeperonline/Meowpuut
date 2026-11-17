@@ -2,8 +2,9 @@
  * 键盘 ArkUI 组件（对应 Android ime/KeyboardView.kt + KeysView.kt + CandidateBarView.kt 的合并）。
  * 用 Canvas 绘制候选栏玻璃、键盘按键与猫咪；触控交给 KeyTouches 状态机。
  */
-import { Box, boxCenterX, keyMetricsOf, keyMetricsFitted, layoutKeyGrid, Idiom, resolveIdiom,
+import { Box, boxCenterX, keyMetricsOf, keyMetricsFitted, layoutKeyGrid, Idiom,
   CandidateRegionLayout, KeyPlacement, KeyBalloon, AlternatesStrip, KeyMetrics } from './Geometry';
+import { LayoutSolution } from './FormFactor';
 import { Key, KeySet, KeyIcon, KeyStyle, KeyBuilder, KeyContext, ShiftState } from './Keys';
 import { KeyTouches, KeyListener, TouchHost } from './KeyTouches';
 import { GlassPainter, PillPainter, roundRect, Glyphs, tracePath, Canvas2D } from './Painting';
@@ -259,12 +260,17 @@ export struct MeowpuutKeyboard {
   onComposingCursorEvt?: (pos: number) => void;
   /** 候选栏下拉收起键盘。 */
   onHideEvt?: () => void;
+  /** 【round 66 框架】面板实际窗口尺寸变化（vp）：回报 ability 重解断点+面板高度（分屏按窗口）。 */
+  onPanelAreaEvt?: (widthVp: number, heightVp: number) => void;
 
   private state: KeyboardState = makeEmptyState();
   private touches: KeyTouches | null = null;
   private keySet: KeySet | null = null;
   private placements: KeyPlacement[][] = [];
   private idiom: Idiom = Idiom.PHONE;
+  /** 【round 66 框架】当前布局解（形态/岛宽/居中偏移）——rebuild 时由 LayoutSolution.solve 求出，
+   *  ability 侧 resizePanel 用同一入口求解，两侧几何永不脱节。 */
+  private solution: LayoutSolution = LayoutSolution.solve(393, 800);
   private metrics = keyMetricsOf(Idiom.PHONE, 393, 4);
   @State private kbWidth: number = 393;
   @State private kbHeight: number = 720;
@@ -848,15 +854,17 @@ export struct MeowpuutKeyboard {
       this.lastComposing = this.state.composing;
       this.animateLean(this.state.composing ? 1 : 0);
     }
-    // resolveIdiom 的签名是 (屏幕高度, 最小宽度)。这里键盘宽度就是最小宽度，
-    // 屏幕高度必须取整块屏幕，否则键盘自身高度 370 < 500 会被误判成横屏。
-    this.idiom = resolveIdiom(this.screenHeightDp(), this.kbWidth);
+    // 【round 66 框架】形态/断点/岛宽一次求解：宽度=窗口实际宽（分屏按窗口），
+    // 高度=整屏高（键盘自身高恒 <500vp 不可作横屏判据）。ability 的 resizePanel
+    // 用同一入口取解，面板高度与绘制几何永远一致。
+    this.solution = LayoutSolution.solve(this.kbWidth, this.screenHeightDp());
+    this.idiom = this.solution.idiom;
     // 键盘行数：注音 5 行，其余 4 行。切换页高不跳（用 5 行定高）。
     const baseRows = ctx.mode === InputMode.ZHUYIN && !ctx.english ? 5 : 4;
     const keySet = KeyBuilder.build(ctx);
     const rows = keySet.rows.length;
     this.keySet = keySet;
-    this.metrics = keyMetricsFitted(this.idiom, this.kbWidth, rows, baseRows);
+    this.metrics = keyMetricsFitted(this.idiom, this.solution.contentW, rows, baseRows);
     // 键盘高度（对应 Android keyboardHeight）：对 natural 键高应用缩放，
     // 使 short/tall 档位在 panel 高度之外也真实改变键帽大小。
     const scale = this.state.keyboard.heightScale;
@@ -867,8 +875,10 @@ export struct MeowpuutKeyboard {
     }
     // 【round 64】传入 KeySet.maximumWidth（九键 460dp）：宽于上限的屏幕上键区
     // 收窄并整体水平居中（对照安卓 KeyboardView.onLayout 的 keyLeft 居中）。
-    this.placements = layoutKeyGrid(keySet.specs, this.kbWidth, keySet.referenceColumns, this.metrics,
-      keySet.maximumWidth !== null ? keySet.maximumWidth : 0);
+    // 【round 66 框架】width 传岛宽、originX 传岛偏移：岛化形态键区在岛内居中、
+    // 命中区延展到岛缘；铺满形态 originX=0 零变化。
+    this.placements = layoutKeyGrid(keySet.specs, this.solution.contentW, keySet.referenceColumns, this.metrics,
+      keySet.maximumWidth !== null ? keySet.maximumWidth : 0, this.solution.contentLeft);
     this.touches?.layout(keySet, this.placements, this.kbWidth, true);
     // 【round 65 ②】键位几何定了，刷新逐键虚拟节点（展开态候选格在 drawPanel 里补）。
     this.updateA11yKeyNodes();
@@ -925,8 +935,8 @@ export struct MeowpuutKeyboard {
     if (keyHeight <= m.keyHeight) return;
     this.metrics = new KeyMetrics(m.sideMargin, m.keyGap, keyHeight, m.rowGap,
       m.topPadding, m.bottomPadding, m.cornerRadius, m.letterFont, m.utilityFont);
-    this.placements = layoutKeyGrid(this.keySet.specs, this.kbWidth, this.keySet.referenceColumns, this.metrics,
-      this.keySet.maximumWidth !== null ? this.keySet.maximumWidth : 0);
+    this.placements = layoutKeyGrid(this.keySet.specs, this.solution.contentW, this.keySet.referenceColumns, this.metrics,
+      this.keySet.maximumWidth !== null ? this.keySet.maximumWidth : 0, this.solution.contentLeft);
     this.touches?.layout(this.keySet, this.placements, this.kbWidth, true);
   }
 
@@ -952,7 +962,8 @@ export struct MeowpuutKeyboard {
   }
 
   private keyboardRegionHeight(): number {
-    const region = new CandidateRegionLayout(this.kbWidth, this.idiom, this.state.keyboard.cats);
+    // 【round 66 框架】岛宽求解：候选栏高度只随岛宽变化（与 drawCandidateBar 同解）。
+    const region = new CandidateRegionLayout(this.solution.contentW, this.idiom, this.state.keyboard.cats);
     return region.height;
   }
 
@@ -1055,6 +1066,9 @@ export struct MeowpuutKeyboard {
         this.rebuild();
         // 面板尺寸确定后，把键高撑满剩余空间，消除底部死区。
         this.drawTick++;
+        // 【round 66 框架】回报实际窗口尺寸：ability 重解断点/重算面板高度。
+        // 分屏收窄、折叠开合都从这里拿到「窗口真实宽」（分屏按窗口适配的输入源）。
+        this.onPanelAreaEvt?.(Math.round(w), Math.round(h));
       }
     })
   }
@@ -1552,7 +1566,9 @@ export struct MeowpuutKeyboard {
       }
       if (change.type !== TouchType.Down) continue;
       const look = this.state.keyboard;
-      const region = new CandidateRegionLayout(this.kbWidth, this.idiom, look.cats);
+      // 【round 66 框架】触控命中用岛内坐标（与绘制同解）。
+      const region = new CandidateRegionLayout(this.solution.contentW, this.idiom, look.cats,
+        0, this.solution.contentLeft);
       const x = change.x;
       const y = change.y;
 
@@ -1665,7 +1681,9 @@ export struct MeowpuutKeyboard {
     }
     if (this.barTapValid) {
       this.barTapValid = false;
-      const region = new CandidateRegionLayout(this.kbWidth, this.idiom, this.state.keyboard.cats);
+      // 【round 66 框架】候选点击命中用岛内坐标（与绘制同解）。
+      const region = new CandidateRegionLayout(this.solution.contentW, this.idiom,
+        this.state.keyboard.cats, 0, this.solution.contentLeft);
       this.hitCandidate(region, this.barTapX);
     }
   }
@@ -1811,7 +1829,9 @@ export struct MeowpuutKeyboard {
     const ctx = this.barCtx;
     const w = this.kbWidth;
     const look = this.state.keyboard;
-    const region = new CandidateRegionLayout(w, this.idiom, look.cats);
+    // 【round 66 框架】区域按岛宽求解 + 岛偏移：岛化形态玻璃/候选行/箭头整体居中。
+    const region = new CandidateRegionLayout(this.solution.contentW, this.idiom, look.cats,
+      0, this.solution.contentLeft);
     const h = region.height;
     ctx.clearRect(0, 0, w, h);
     // 【真机反馈 round 60-4】字母/候选/猫咪区域背景透明：候选栏不再铺键盘底色，
@@ -1950,8 +1970,10 @@ export struct MeowpuutKeyboard {
     const arrowWidth = CandidateRegionLayout.ARROW_WIDTH + 2;
     const arrowHeight = CandidateRegionLayout.ARROW_WIDTH / 2 + 2;
     const chevronCx = region.chevron.left + region.chevron.width / 2;
+    // 【round 66 框架】CatStage.width 语义是「窗口绝对右边界」（落座校验用）：
+    // 岛化形态玻璃已含 originX 偏移，右边界 = 岛宽 + 偏移。
     return new CatStage(
-      region.width, region.height, region.glass, shape, region.scale,
+      region.width + region.originX, region.height, region.glass, shape, region.scale,
       Math.max(0, region.glass.top - 1.5),
       new Box(region.row.left, middle - region.pillHeight / 2, region.row.width, region.pillHeight),
       new Box(chevronCx - arrowWidth / 2, middle - arrowHeight / 2, arrowWidth, arrowHeight));
@@ -2199,7 +2221,7 @@ export struct MeowpuutKeyboard {
     const arrowRight = region.chevron.left + region.chevron.width / 2 +
       CandidateRegionLayout.ARROW_WIDTH / 2;
     const box = Festivals.placeRight(festival.right, region.glass, [band.low, band.high],
-      region.width, arrowRight);
+      region.width + region.originX, arrowRight);
     if (box === null) return;
     // 【优化 round 64】物理像素尺寸查缓存 Map（loadFestivalArt 回调里已存），
     // 免掉每帧 getImageInfoSync；缓存缺失时回退同步取一次并回填。
@@ -2220,7 +2242,8 @@ export struct MeowpuutKeyboard {
     // 用 evenodd 在整块画布上挖掉玻璃轮廓。rect 左/上也留 80 余量：
     // 猫 frame 顶部（anchorY - anchorY*height）可能是负 y（猫头探到候选栏上缘之外），
     // 若 rect 从 (0,0) 起会把负坐标的猫头顶误裁。
-    ctx.rect(-80, -80, region.width + 160, region.height + 160);
+    // 【round 66 框架】右边界含岛偏移（玻璃在窗口内平移后外框要罩住全岛）。
+    ctx.rect(-80, -80, region.width + region.originX + 160, region.height + 160);
     tracePath(ctx, look.shape, region.glass);
     ctx.clip('evenodd');
   }
@@ -2624,7 +2647,9 @@ export struct MeowpuutKeyboard {
 
   /** 重新排展开面板的候选网格（对应 Android ExpandedPanelView.relayout）。 */
   private layoutPanel(): void {
-    const w = this.kbWidth;
+    // 【round 66 框架】展开面板按岛宽排版、画在岛偏移处（与键区同岛）。
+    const w = this.solution.contentW;
+    const ox = this.solution.contentLeft;
     if (w <= 0) return;
     const margin = 10;
     const usable = w - 2 * margin;
@@ -2649,7 +2674,7 @@ export struct MeowpuutKeyboard {
       const cellW = columns * quarter + (columns - 1) * MeowpuutKeyboard.PANEL_GAP;
       const room = cellW - 28 - (japanese ? 18 * 0.45 + 6 : 0);
       const shown = natural > cellW ? this.panelEllipsize(c.text, room) : c.text;
-      list.push(new PanelCell(i, margin + x, y, cellW, shown, japanese));
+      list.push(new PanelCell(i, ox + margin + x, y, cellW, shown, japanese));
       x += cellW + MeowpuutKeyboard.PANEL_GAP;
       columnsUsed += columns;
     }
@@ -2771,7 +2796,9 @@ export struct MeowpuutKeyboard {
   /** 绘制展开面板（对应 Android ExpandedPanelView.onDraw）。 */
   private drawPanel(ctx: CanvasRenderingContext2D, total: number): void {
     const look = this.state.keyboard;
-    const w = this.kbWidth;
+    // 【round 66 框架】展开面板跟随键区同岛：底板画在 [contentLeft, contentLeft+contentW]。
+    const w = this.solution.contentW;
+    const ox = this.solution.contentLeft;
     // 【优化 round 64】排版缓存：候选 token 与面板宽都未变时跳过整轮 layoutPanel
     // （逐候选 measureText + 逐格求宽）。panelCells 是确定性的纯函数结果，
     // 输入不变则输出逐字节相同，跳过重排像素不变；滚动只影响绘制平移。
@@ -2795,16 +2822,16 @@ export struct MeowpuutKeyboard {
 
     // 不透明底（没有背景模糊，按键会像鬼影透出来）。
     ctx.fillStyle = look.dark ? 'rgb(40,38,42)' : 'rgb(246,245,249)';
-    roundRect(ctx, 4, 2, w - 4, h - 2, 15);
+    roundRect(ctx, ox + 4, 2, w - 4, h - 2, 15);
     ctx.fill();
     // 上左打光的边框。
     ctx.strokeStyle = withAlpha(look.rim, look.dark ? 0.6 : 0.95);
     ctx.lineWidth = 1;
-    roundRect(ctx, 4, 2, w - 4, h - 2, 15);
+    roundRect(ctx, ox + 4, 2, w - 4, h - 2, 15);
     ctx.stroke();
 
     ctx.save();
-    roundRect(ctx, 4, 2, w - 4, h - 2, 15);
+    roundRect(ctx, ox + 4, 2, w - 4, h - 2, 15);
     ctx.clip();
     ctx.translate(0, -this.panelScroll);
 

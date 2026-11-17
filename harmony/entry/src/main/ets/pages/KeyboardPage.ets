@@ -72,6 +72,8 @@ struct KeyboardPage {
         onPetEvt: (cat: string) => this.host.callbacks?.onPet(cat),
         onComposingCursorEvt: (pos: number) => this.host.callbacks?.onComposingCursor(pos),
         onHideEvt: () => this.host.callbacks?.onHide(),
+        // 【round 66 框架】窗口实际尺寸变化回报：分屏/折叠开合后 ability 重解断点+面板高度。
+        onPanelAreaEvt: (w: number, h: number) => this.host.callbacks?.onPanelArea(w, h),
       })
     }
     .width('100%')

@@ -34,14 +34,12 @@ export function boxOffset(b: Box, dx: number, dy: number): Box {
 }
 export function boxZero(): Box { return new Box(0, 0, 0, 0); }
 
+/**
+ * 渲染语义的设备版式。round 66 起 Idiom 由 FormFactor 框架（DeviceForm）映射而来，
+ * 不再按「设备最小宽」独立判定；FOLD 为折叠展开档（600–840vp 窗口）。
+ */
 export enum Idiom {
-  PHONE, PHONE_LANDSCAPE, TABLET,
-}
-
-export function resolveIdiom(screenHeightDp: number, smallestWidthDp: number): Idiom {
-  if (smallestWidthDp >= 600) return Idiom.TABLET;
-  if (screenHeightDp < 500) return Idiom.PHONE_LANDSCAPE;
-  return Idiom.PHONE;
+  PHONE, PHONE_LANDSCAPE, TABLET, FOLD,
 }
 
 class BarFrame {
@@ -62,17 +60,34 @@ export class CandidateRegionLayout {
   readonly idiom: Idiom;
   readonly cats: boolean;
   readonly rim: number;
+  /**
+   * 【round 66 框架】岛在窗口内的水平偏移（vp）。岛化形态（FOLD/TABLET 居中岛）
+   * 下 glass/row/chevron 均为窗口绝对坐标（已含偏移）；width 仍是岛宽。
+   * 消费方需要「窗口右边界」时用 width + originX（如 CatStage 落座校验）。
+   */
+  readonly originX: number;
 
-  constructor(rawWidth: number, idiom: Idiom, cats: boolean = true, rim: number = 0) {
+  constructor(rawWidth: number, idiom: Idiom, cats: boolean = true, rim: number = 0,
+    originX: number = 0) {
     this.idiom = idiom;
     this.cats = cats;
     this.rim = rim;
+    this.originX = originX;
     this.width = (Number.isFinite(rawWidth) && rawWidth > 1) ? rawWidth : 320;
     let s: number, regionHeight: number, glassHeight: number;
     let leftHeight: number, rightHeight: number, font: number;
     let statusFont: number;
     switch (idiom) {
       case Idiom.PHONE:
+        s = Math.min(1.15, Math.max(0.9, this.width / 393));
+        regionHeight = 82 * s; glassHeight = 46 * s;
+        leftHeight = 62 * s; rightHeight = 54 * s;
+        font = Math.min(21, Math.max(19, 20 * s));
+        statusFont = Math.round(13 * s);
+        break;
+      case Idiom.FOLD:
+        // 【round 66 框架】折叠展开档：公式与手机同源，岛宽 ≤600vp 喂入
+        // （600/393≈1.53 → s 封顶 1.15，候选栏高 ≈94vp 接近平板观感）。
         s = Math.min(1.15, Math.max(0.9, this.width / 393));
         regionHeight = 82 * s; glassHeight = 46 * s;
         leftHeight = 62 * s; rightHeight = 54 * s;
@@ -137,6 +152,13 @@ export class CandidateRegionLayout {
       const rowLeft = this.glass.left + glassHeight * 0.3;
       this.row = new Box(rowLeft, this.glass.top, Math.max(1, this.chevron.left - rowLeft), glassHeight);
     }
+    // 【round 66 框架】岛偏移：三个盒子的 left 平移 originX（岛在窗口内居中）。
+    // 铺满形态 originX=0 时零开销、零行为变化。
+    if (originX !== 0) {
+      this.glass = boxOffset(this.glass, originX, 0);
+      this.chevron = boxOffset(this.chevron, originX, 0);
+      this.row = boxOffset(this.row, originX, 0);
+    }
   }
 
   get maximumCandidateWidth(): number { return Math.max(60, this.row.width * 0.70); }
@@ -191,7 +213,10 @@ export function keyMetricsAreaHeight(m: KeyMetrics, rows: number): number {
 export function keyMetricsOf(idiom: Idiom, width: number, rows: number): KeyMetrics {
   const dense = rows >= 5;
   switch (idiom) {
+    case Idiom.FOLD:
     case Idiom.PHONE: {
+      // 【round 66 框架】FOLD（折叠展开，岛宽 ≤600vp）与 PHONE 同源公式：
+      // 岛宽喂入时 s 封顶 1.06，键高 ≈45vp，手感与直板机一致（Gboard 展开态同策略）。
       const s = Math.min(1.06, Math.max(0.94, width / 393));
       return new KeyMetrics(
         3, 6,
@@ -264,11 +289,13 @@ export class KeyPlacement {
 }
 
 export function layoutKeyGrid(rows: RowSpec[], width: number, referenceColumns: number, metrics: KeyMetrics,
-  maximumWidth: number = 0): KeyPlacement[][] {
+  maximumWidth: number = 0, originX: number = 0): KeyPlacement[][] {
   // 【round 64】maximumWidth（对照安卓 KeySet.layoutWidth + KeyboardView.onLayout）：
   // 可用宽度收窄到上限后，整个键区网格水平居中（keyLeft=(width-layoutWidth)/2）。
+  // 【round 66 框架】originX：岛化形态（FOLD/TABLET 居中岛）把整块网格平移到
+  // 岛的窗口偏移处；width 传岛宽，命中区延展到岛缘（岛外 margin 为死区）。
   const layoutWidth = maximumWidth > 0 ? Math.min(width, maximumWidth) : width;
-  const shift = (width - layoutWidth) / 2;
+  const shift = (width - layoutWidth) / 2 + originX;
   const usable = Math.max(1, layoutWidth - 2 * metrics.sideMargin);
   const unit = Math.max(1, (usable - (referenceColumns - 1) * metrics.keyGap) / referenceColumns);
   const totalHeight = keyMetricsAreaHeight(metrics, rows.length);
@@ -330,8 +357,10 @@ export function layoutKeyGrid(rows: RowSpec[], width: number, referenceColumns: 
     }
     const rowPlacements: KeyPlacement[] = [];
     frames.forEach((frame, c) => {
-      const left = c === 0 ? 0 : (boxRight(frames[c - 1]) + frame.left) / 2;
-      const right = c === frames.length - 1 ? width : (boxRight(frame) + frames[c + 1].left) / 2;
+      // 【round 66 框架】首末键命中区延展到岛缘（[originX, originX+width]），
+      // 岛外窗口 margin 为死区——平板边缘误触不进键。
+      const left = c === 0 ? originX : (boxRight(frames[c - 1]) + frame.left) / 2;
+      const right = c === frames.length - 1 ? width + originX : (boxRight(frame) + frames[c + 1].left) / 2;
       rowPlacements.push(new KeyPlacement(
         r, c, frame,
         new Box(left, hitTop, Math.max(0, right - left), hitBottom - hitTop),

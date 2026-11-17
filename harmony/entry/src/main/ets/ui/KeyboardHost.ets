@@ -60,6 +60,11 @@ export interface KeyboardCallbacks {
   onComposingCursor(pos: number): void;
   /** 【悬浮键盘】拖动把手：把面板移动 (dx,dy) 像素。 */
   onDragPanel(dx: number, dy: number): void;
+  /**
+   * 【round 66 框架】面板实际窗口尺寸变化（onAreaChange 回报，vp）：
+   * 分屏收窄/折叠开合后，ability 用新窗口宽重解断点、重算面板高度。
+   */
+  onPanelArea(widthVp: number, heightVp: number): void;
   /** 【候选栏下拉】手指在候选栏下滑超过阈值时收起键盘（鸿蒙增强）。 */
   onHide(): void;
   /** 【剪贴板 round 61】点击「粘贴」芯片：让聚焦编辑框执行系统粘贴。 */
