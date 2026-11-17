@@ -1294,7 +1294,7 @@ export struct MeowpuutKeyboard {
     }
   }
 
-  /** 滚轮位移换算：垂直轴值(vp)，鼠标滚轮无轴值时按 scrollStep 折算一格。 */
+  /** 滚轮位移换算：两个来源单位不同，必须分开换算（详见函数体注释）。 */
   private static axisDelta(event: AxisEvent): number {
     let v = 0;
     try {
@@ -1302,13 +1302,29 @@ export struct MeowpuutKeyboard {
     } catch (e) {
       v = 0;
     }
-    if (v === 0) {
+    // 【round 65 ④ 修正】两条来源的单位不同，不能共用同一个系数：
+    //  · getVerticalAxisValue() 按 SDK 注释单位是 **vp**，鼠标滚轮一格通常远小于 1
+    //    （常见 0.1~0.5），故 ×48 换算成「一格≈48vp」的手感；
+    //  · scrollStep 是**刻度计数**（无量纲整数，常见 ±1），初版把它也 ×(48/15)，
+    //    等于把 1 个刻度当成 3.2vp 再放大，位移被多算了 3 倍以上。
+    let steps = 0;
+    if (v !== 0) {
+      steps = v * 48;
+    } else {
       const s = event.scrollStep;
-      if (s !== undefined && s !== 0) v = s > 0 ? 48 : -48;
+      if (s !== undefined && s !== 0) steps = s * 48;
     }
-    // 一格滚轮 ≈ 48vp（候选 1~2 个 / 面板一行），真机手感可调。
-    return Math.round(v * 48 / 15);
+    if (steps === 0) return 0;
+    return Math.round(steps * MeowpuutKeyboard.WHEEL_DIRECTION);
   }
+
+  /**
+   * 【真机待校准】滚轮方向系数：SDK 未规定垂直轴值的正负与「内容滚动方向」的对应
+   * 关系（getVerticalAxisValue 的注释只写了单位 vp，没有方向说明）。按常见约定
+   * 「正值 = 内容向下滚动」取 +1；若真机实测方向相反，把这里改成 -1 即可，
+   * 无需改动调用点。
+   */
+  private static readonly WHEEL_DIRECTION = 1;
 
   /** 键区滚轮：展开面板态纵向滚候选格；常态不打扰按键（不透传候选栏）。 */
   private handleKeyWheel(event: AxisEvent): void {
@@ -1326,12 +1342,12 @@ export struct MeowpuutKeyboard {
   /** 候选栏滚轮：垂直滚动 → 候选行横向平移（对照 Android 鼠标滚轮滚候选）。 */
   private handleBarWheel(event: AxisEvent): void {
     let dy = MeowpuutKeyboard.axisDelta(event);
-    if (dy === 0) return;
-    // 触摸板横向轴直接映射（Shift+滚轮同理）。
+    // 触摸板横向轴优先（单位同为 vp，同一换算系数 + 同一方向系数）。
     try {
       const hx = event.getHorizontalAxisValue();
-      if (hx !== 0) dy = Math.round(hx * 48 / 15);
+      if (hx !== 0) dy = Math.round(hx * 48 * MeowpuutKeyboard.WHEEL_DIRECTION);
     } catch (e) { /* 无横向轴用垂直值 */ }
+    if (dy === 0) return;
     const next = Math.max(0, Math.min(this.barMaxScroll, this.barScroll + dy));
     if (next !== this.barScroll) {
       this.barScroll = next;
