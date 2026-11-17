@@ -1945,3 +1945,34 @@ MeowpuutGlass  glass stats: hit=N direct=M render=R
 - ④ 明确**先验手指打字**再验鼠标（`SourceType.Mouse` 过滤是最高风险点）。
 
 **仿真一律无法覆盖**（必须真机）：`OffscreenCanvas` 实际像素与 `transferToImageBitmap` 成果、`drawImage` 的点播语义、a11y 树是否接纳虚拟节点、鼠标/滚轮事件真实投递与符号、`KEYCODE_SHIFT` 是否到达 delegate、GC 曲线与手感。**这些恰恰是四项验收的核心，故四项仍全部未验收。**
+
+### 追加：round 65 真机反馈 9 项修复（2026-11-17 用户设备实测）
+
+用户在真机（自装 HAP 实测）回报 9 项缺陷，分两批修复完毕。
+
+**第一批（6 项，commit 8d3cb19）——按键/鼠标/无障碍路径：**
+
+| # | 反馈 | 根因 | 修复 |
+| --- | --- | --- | --- |
+| ④ | hover 只第一个键有描边 | `onHover` 只在进出组件时各触发一次；组件内持续移动靠 `onMouse` 的 `MouseAction.Hover`（值 3），**此前完全没处理** | `handleKeyMouse` 顶部加 Hover 分支调新方法 `trackHover(x,y)`；`handleKeyHover` 的进出逻辑与之共用 |
+| ② | 读屏点候选词不念具体词 | 候选栏 Canvas 的 `accessibilityText` 写死为「喵扑输入键盘候选栏」 | 改为 `candidatesSpoken()` 动态拼接当前候选/联想前 5 项：「候选：你好，世界…」 |
+| ⑥a | 滚轮滚候选跳变无动画 | `barScroll` 直接赋值无过渡 | `animateBarScrollTo`（ease-out 30%/帧 ~150ms，`barScrollAnimGen` 代数计数器取消旧帧；手指按上候选行时 `barPress` 里 gen++ 取消）；面板滚轮同套 `animatePanelScrollTo` |
+| ⑥b | 候选栏滑动误触关闭键盘 | 根 PanGesture 与候选栏自身的下拉收起判定**重复**：横拖候选时纵向分量被根手势当成下拉（`offsetY>56` 无横纵比检查），栏自己的判定（`dy>64 && dy>|dx|*1.5`）更严 | 根 PanGesture 加 `barDragId >= 0` 守卫：触点在候选行时根手势让位给栏自己的判定 |
+| ⑦ | 展开面板顶部跳变 | `panelScroll` 瞬移同 ⑥a | 同套平滑动画 |
+| ⑧ | 右键字母无反应 | 不明（可能 IME 面板不投递右键 / `MouseButton.Right` 值不对 / 键无 alternates） | `handleKeyMouse` 右键入口 + `openMouseAlternates` 每个提前 return 分支加 `hilog`（`MeowpuutMouse` 标签：rightPress / no hit / key disabled / no alternates / opening），真机一跑即定位 |
+
+**第二批（4 项，本次 commit）——组字光标 / 弹框方向 / 设置页 / 玻璃板：**
+
+| # | 反馈 | 根因 | 修复 |
+| --- | --- | --- | --- |
+| ⑨ | 打字一半不能点选字母修改（wobini→点b→退格→打a→我爱你） | Composer 只支持串尾追加/删除 | **三件套**：①Composer 加 `cursor` 属性（-1=串尾/未设，0..raw.length）；`backspace()` 光标在中间时删 `[cursor-1]` 并整串 `replay()`（不能发单键退格——那删的是串尾）；`type()` 光标在中间时走新 `insertAtCursor`（插入+重放）。②候选行首位画**组字串条**（`drawComposingStrip`：浅底 pill + 逐字符 + accent 光标竖线，`composingCharXs` 记录字符边界供点击定位）；点字符把光标移到最近边界。③回调链 `onComposingCursorEvt→KeyboardHost.onComposingCursor→Ability.onComposingCursor` 写回 Composer。选词/串截短时 `keepSuffix`/`choose` 清光标回串尾模式。**19 项断言仿真**（`tools/sim-composing-cursor.mjs`）全过：wobini→点b→退格→woini→打a→woaini；串首退格不动；连续中退×2；连插 3 字符；清光标回串尾；越界 clamp |
+| ③ | 长按弹框有时向上有时向下 | `AlternatesStrip.fromKey` / `KeyBalloon.bubble` 对顶行翻到下方（round 60-2 为防出 Canvas），其余行在上方——方向不一致观感混乱 | 一律向上：`y = max(2, key.top - STRIP_H - 4)`（strip）/ `y = max(0, key.top - height + 2)`（balloon）。顶行 clamp 后盖在键帽上（对照 Gboard），**不再翻到下方打乱布局** |
+| ⑤ | 点猫切简繁后设置页不刷新 | 设置页只在 `aboutToAppear` 读一次 Prefs，IME 进程改值后**从不订阅**广播 | `aboutToAppear` 里 `prefs.subscribe(refreshFromPrefs)`（自环去重保证自身改动不触发多余回读）+ `onPageShow` 兜底重读 |
+| ② | 字母区像一整块玻璃板，要每键独立玻璃板 | 键面（白 #FFFFFF→#FAFAFC）与背景（#E9E8EF→#D9D8E0）亮度差仅 ~9%，键与底板糊成一片 | 背景压暗 ~10%（浅 #D6D3DE→#C8C5D0 / 深 #1E1D21→#161519）变成「托盘」；键帽投影加强（blur 3→4.5、下偏 1.5→2、不透明度 +50%）让每块玻璃板「浮」在托盘上 |
+
+**验收口径（真机）**：
+- ⑨：输入 wobini → 候选行首位出现「wobini」小字条+光标竖线在末尾 → 点 b → 竖线跳到 b/i 之间 → 退格 → 条变「woini」竖线在 o/i 之间 → 打 a → 条变「woaini」候选出「我爱你」→ 空格上屏。
+- ③：顶行长按（如九键「1」或符号首行）弹出物在键帽上方（可盖键帽），不向下弹到第二行；其余行同样向上。
+- ⑤：键盘开着切到设置页（或设置页开着弹键盘）→ 点莫莫 5 下切简繁 → 设置页「简体/繁體」行实时跟随。
+- ②：键帽白板与暗底之间有清晰明暗分界，每键投影可见——不再是整片白板。
+- ⑧：抓 `hilog | grep MeowpuutMouse` 看右键日志走到哪个分支。

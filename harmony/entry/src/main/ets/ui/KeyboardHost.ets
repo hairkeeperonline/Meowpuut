@@ -56,6 +56,8 @@ export interface KeyboardCallbacks {
   onPunctuation(mark: string): void;
   onToggleExpanded(): void;
   onPet(cat: string): void;
+  /** 【真机反馈 ⑨】点组字串上的字符定位光标。 */
+  onComposingCursor(pos: number): void;
   /** 【悬浮键盘】拖动把手：把面板移动 (dx,dy) 像素。 */
   onDragPanel(dx: number, dy: number): void;
   /** 【候选栏下拉】手指在候选栏下滑超过阈值时收起键盘（鸿蒙增强）。 */

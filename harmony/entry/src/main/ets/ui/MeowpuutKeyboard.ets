@@ -35,12 +35,17 @@ export class KeyboardState {
   canExpand: boolean;
   composing: boolean;
   japaneseMarks: boolean;
+  /** 【真机反馈 ⑨】组字中的原始输入串（拼音/注音字母），画在候选栏首位可点选定位光标。 */
+  composingRaw: string;
+  /** 【真机反馈 ⑨】组字串内光标位（-1=串尾/未设置；0..raw.length）。 */
+  composingCursor: number;
   /** 今日节日主题（无则 null），用于换装猫与右端饰簇。 */
   festival: FestivalTheme | null;
   constructor(keyboard: Look, keyCtx: KeyContext, candidates: Candidate[], visibleIndices: number[],
     highlighted: number, predictions: string[], punctuation: string[], status: string,
     expanded: boolean, canExpand: boolean, composing: boolean, japaneseMarks: boolean,
-    festival: FestivalTheme | null = null) {
+    festival: FestivalTheme | null = null,
+    composingRaw: string = '', composingCursor: number = -1) {
     this.keyboard = keyboard;
     this.keyCtx = keyCtx;
     this.candidates = candidates;
@@ -54,6 +59,8 @@ export class KeyboardState {
     this.composing = composing;
     this.japaneseMarks = japaneseMarks;
     this.festival = festival;
+    this.composingRaw = composingRaw;
+    this.composingCursor = composingCursor;
   }
 }
 
@@ -248,6 +255,8 @@ export struct MeowpuutKeyboard {
   onPunctuationEvt?: (mark: string) => void;
   onToggleExpandedEvt?: () => void;
   onPetEvt?: (cat: string) => void;
+  /** 【真机反馈 ⑨】点组字串上的字符定位光标。 */
+  onComposingCursorEvt?: (pos: number) => void;
   /** 候选栏下拉收起键盘。 */
   onHideEvt?: () => void;
 
@@ -315,6 +324,8 @@ export struct MeowpuutKeyboard {
   private barScroll: number = 0;
   private barMaxScroll: number = 0;
   private barContentWidth: number = 0;
+  /** 【真机反馈 ⑨】组字串各字符边界在内容坐标里的 x 位置（0..n，含尾端）。 */
+  private composingCharXs: number[] = [];
   private barDragId: number = -1;
   private barDownX: number = 0;
   private barDownY: number = 0;
@@ -1718,6 +1729,26 @@ export struct MeowpuutKeyboard {
     let items0 = 0;
     const hit = (w: number): boolean => x >= cx && x < cx + w;
 
+    // 【真机反馈 ⑨】组字串点击：找最近的字符边界定位光标（不是选候选）。
+    if (st.composing && st.composingRaw.length > 0) {
+      const stripW = MeowpuutKeyboard.composingStripW(st.composingRaw, font);
+      if (x >= cx && x < cx + stripW) {
+        // composingCharXs 由 drawComposingStrip 记录（屏幕坐标含 scroll）；
+        // 若尚未画过（首帧前点击）则按公式推算。
+        let pos = st.composingRaw.length;
+        if (this.composingCharXs.length === st.composingRaw.length + 1) {
+          let bestDist = Infinity;
+          for (let i = 0; i < this.composingCharXs.length; i++) {
+            const d = Math.abs(this.composingCharXs[i] - x);
+            if (d < bestDist) { bestDist = d; pos = i; }
+          }
+        }
+        this.onComposingCursorEvt?.(pos);
+        return true;
+      }
+      cx += stripW + gap;
+    }
+
     if (st.candidates.length > 0) {
       for (const i of st.visibleIndices) {
         const c = st.candidates[i];
@@ -2208,6 +2239,10 @@ export struct MeowpuutKeyboard {
     let x = 4;
     const gap = 6;
     const maxText = region.maximumCandidateWidth - 24;
+    // 【真机反馈 ⑨】组字串占首位：内容宽度先加上它的条宽（否则不能滚动到后面的候选）。
+    if (st.composing && st.composingRaw.length > 0) {
+      x += MeowpuutKeyboard.composingStripW(st.composingRaw, font) + gap;
+    }
 
     // 先把整行排出来（内容坐标），再按 barScroll 平移绘制——
     // 对应 Android 的 contentWidth / maxScroll，候选多了可以横向拖动。
@@ -2269,6 +2304,10 @@ export struct MeowpuutKeyboard {
     ctx.rect(row.left, row.top - 2, row.width, row.height + 4);
     ctx.clip();
     let cx = row.left + 4 - this.barScroll;
+    // 【真机反馈 ⑨】组字串画在候选行首位：逐字符 + 光标竖线，点击字符定位光标。
+    if (st.composing && st.composingRaw.length > 0) {
+      cx = this.drawComposingStrip(ctx, st, cx, cy, look, font, region);
+    }
     let n = 0;
     for (const item of items) {
       if (cx > row.left + row.width || cx + item.width < row.left) { cx += item.width + gap; n++; continue; }
@@ -2323,6 +2362,62 @@ export struct MeowpuutKeyboard {
     // 两端渐隐（对照 Android drawRow 的 fadeRowEnds）：内容超宽时在行两端擦淡，而非硬裁字符。
     if (this.barMaxScroll > 0.5) this.fadeRowEnds(ctx, row);
     ctx.restore();
+  }
+
+  // ---------------- 【真机反馈 ⑨】组字串（可点选定位光标） ----------------
+
+  /** 组字串每字符的等宽格宽度（font * 0.62 ≈ 小写字母视觉宽度）。 */
+  private static COMPOSING_CHAR_W(font: number): number { return font * 0.62; }
+  /** 组字串条总宽：字符数 × 格宽 + 两侧 padding。 */
+  private static composingStripW(raw: string, font: number): number {
+    return raw.length * MeowpuutKeyboard.COMPOSING_CHAR_W(font) + 16;
+  }
+
+  /**
+   * 组字串画在候选行首位：浅色底 pill + 逐字符 + accent 光标竖线。
+   * 同时记录每条字符边界在屏幕坐标的 x（composingCharXs），供点击定位。
+   * 返回推进后的 cx（下一个候选项的起点）。
+   */
+  private drawComposingStrip(ctx: CanvasRenderingContext2D, st: KeyboardState,
+    cx: number, cy: number, look: Look, font: number, region: CandidateRegionLayout): number {
+    const raw = st.composingRaw;
+    if (raw.length === 0) return cx;
+    const charW = MeowpuutKeyboard.COMPOSING_CHAR_W(font);
+    const padX = 8;
+    const stripW = MeowpuutKeyboard.composingStripW(raw, font);
+    const pillH = region.pillHeight;
+    const top = cy - pillH / 2;
+
+    // 浅色底 pill。
+    ctx.fillStyle = withAlpha(look.candidateText, 0.10);
+    roundRect(ctx, cx, top, stripW, pillH, pillH / 2);
+    ctx.fill();
+
+    // 记录字符边界（屏幕坐标，含 scroll 偏移——点击时直接比对）。
+    this.composingCharXs = [];
+    for (let i = 0; i <= raw.length; i++) {
+      this.composingCharXs.push(cx + padX + i * charW);
+    }
+
+    // 逐字符。
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = look.candidateSecondary;
+    ctx.font = `${font * 0.88}vp sans-serif`;
+    for (let i = 0; i < raw.length; i++) {
+      ctx.fillText(raw.charAt(i), cx + padX + (i + 0.5) * charW, cy);
+    }
+
+    // 光标竖线（accent 色）。
+    const cursorPos = st.composingCursor >= 0 ? Math.min(st.composingCursor, raw.length) : raw.length;
+    const cursorX = cx + padX + cursorPos * charW;
+    ctx.fillStyle = look.accent;
+    ctx.fillRect(cursorX - 1, top + 4, 2, pillH - 8);
+
+    // 还原字体（drawRow 后续候选用回原 font/textAlign）。
+    ctx.font = `${font}vp sans-serif`;
+    ctx.textAlign = 'left';
+    return cx + stripW + 6;
   }
 
   /**
@@ -2812,11 +2907,13 @@ export struct MeowpuutKeyboard {
         : m.cornerRadius;
     // 底部 1dp 实心底边（对照 Android KeysView.kt:127-129 的 crisp bottom edge）
     // + 【质感 round 60-8】键帽软投影：一次 roundRect 同时得到硬底边与向下的
-    // 柔和落影（浅色紫灰 0.10 / 深色黑 0.22，blur 3、下偏 1.5），键区有立体层次。
+    // 柔和落影，键区有立体层次。
+    // 【真机反馈 ②】投影加强（blur 3→4.5、下偏 1.5→2、不透明度 +50%）：背景压暗后
+    // 每个键帽的玻璃板需要更明显的落影来「浮」在托盘上——独立键面板的立体感。
     ctx.save();
-    ctx.shadowBlur = 3;
-    ctx.shadowOffsetY = 1.5;
-    ctx.shadowColor = look.dark ? 'rgba(0,0,0,0.22)' : 'rgba(61,41,69,0.10)';
+    ctx.shadowBlur = 4.5;
+    ctx.shadowOffsetY = 2;
+    ctx.shadowColor = look.dark ? 'rgba(0,0,0,0.30)' : 'rgba(61,41,69,0.16)';
     ctx.fillStyle = look.keyShadow;
     roundRect(ctx, f.left, f.top + 1, f.width, f.height, shapeR);
     ctx.fill();

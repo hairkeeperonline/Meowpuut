@@ -30,6 +30,9 @@ export class Composer {
   private _highlighted: number = 0;
   private _preedit: string = '';
 
+  /** 【真机反馈 ⑨】组字串内光标位（0..raw.length）。-1 = 未设置（跟串尾，原行为）。 */
+  private _cursor: number = -1;
+
   get mode(): InputMode { return this._mode; }
 
   get simplified(): boolean { return this._simplified; }
@@ -53,6 +56,16 @@ export class Composer {
   get input(): string { return this.raw; }
   get moreAvailable(): boolean { return this.coreFetched < this.coreTotal; }
 
+  /** 【真机反馈 ⑨】光标位置（供 UI 画光标竖线）；-1 或越界视为串尾。 */
+  get cursor(): number {
+    return this._cursor >= 0 && this._cursor <= this.raw.length ? this._cursor : this.raw.length;
+  }
+  set cursor(value: number) {
+    this._cursor = Math.max(0, Math.min(value, this.raw.length));
+  }
+  /** 清除光标（回到「跟串尾」行为）。 */
+  clearCursor(): void { this._cursor = -1; }
+
   /** 日语不需要词库；中文要等引擎会话。 */
   get ready(): boolean { return this._mode === InputMode.JAPANESE || this.session !== 0; }
 
@@ -75,6 +88,13 @@ export class Composer {
 
   type(code: number): Edit {
     const c = String.fromCharCode(code);
+    // 【真机反馈 ⑨】光标在组字串中间时：插入到光标处并整串重放引擎。
+    // 不走各模式 type* 的「尾追 + 单键喂引擎」快速路径——中间插入无法用
+    // 单键表达，必须 clear + 重放。仅光标确实在中间（0 < cursor < raw.length）
+    // 才走此路径；光标在尾/未设置时保持原有高效路径不变。
+    if (this._cursor > 0 && this._cursor < this.raw.length) {
+      return this.insertAtCursor(c);
+    }
     switch (this._mode) {
       case InputMode.PINYIN: return this.typePinyin(c);
       // 九键拼音：数字 2-9 直接进引擎原生九键会话（解码在 Rust 核心里）。
@@ -83,6 +103,24 @@ export class Composer {
       case InputMode.JAPANESE: return this.typeJapanese(c);
       default: return { handled: false, commit: '' };
     }
+  }
+
+  /** 【真机反馈 ⑨】组字串中间插入一个字符并重放引擎。 */
+  private insertAtCursor(c: string): Edit {
+    if (this._mode === InputMode.JAPANESE) {
+      const ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c === '-' || c === "'";
+      if (!ok) return { handled: false, commit: '' };
+      if (this.raw.length >= 80) return { handled: true, commit: '' };
+    } else {
+      if (this.session === 0) return { handled: false, commit: '' };
+      if (this.raw.length >= this.maxInput) return { handled: true, commit: '' };
+    }
+    const pos = this._cursor;
+    this.raw = this.raw.substring(0, pos) + c + this.raw.substring(pos);
+    this._cursor = pos + 1;
+    if (this._mode !== InputMode.JAPANESE && this.session !== 0) this.replay();
+    this.rebuild();
+    return { handled: true, commit: '' };
   }
 
   /** 九键数字输入：数字 2-9 与分词符 ' 直接进引擎原生九键会话（解码在 Rust 核心）。
@@ -177,7 +215,23 @@ export class Composer {
 
   backspace(): Edit {
     if (this.raw.length === 0) return { handled: false, commit: '' };
+    // 【真机反馈 ⑨】光标在组字串中间时删光标前的字符；光标在串首（0）时无字符可删。
+    const pos = this.cursor;
+    if (pos === 0) return { handled: true, commit: '' };
+    if (pos < this.raw.length) {
+      // 中间删除：raw 去掉 [pos-1]，重放引擎（不能只发 KEY_BACKSPACE——那删的是串尾）。
+      this.raw = this.raw.substring(0, pos - 1) + this.raw.substring(pos);
+      this._cursor = pos - 1;
+      if (this._mode !== InputMode.JAPANESE && this.session !== 0) {
+        if (this.raw.length === 0) NativeEngine.clear(this.session);
+        else this.replay();
+      }
+      this.rebuild();
+      return { handled: true, commit: '' };
+    }
+    // 光标在串尾：原有快速路径（单键退格，不需重放）。
     this.raw = this.raw.substring(0, this.raw.length - 1);
+    this._cursor = this.raw.length;
     if (this._mode !== InputMode.JAPANESE && this.session !== 0) {
       if (this.raw.length === 0) {
         NativeEngine.clear(this.session);
@@ -208,7 +262,7 @@ export class Composer {
         }
         const text = NativeEngine.takeCommitted(this.session);
         const rest = NativeEngine.input(this.session);
-        if (rest.length === 0) this.raw = ''; else this.keepSuffix(rest);
+        if (rest.length === 0) { this.raw = ''; this._cursor = -1; } else this.keepSuffix(rest);
         this.rebuild();
         return { handled: true, commit: text };
       }
@@ -259,6 +313,7 @@ export class Composer {
 
   private resetCore(): void {
     this.raw = '';
+    this._cursor = -1;
     if (this.session !== 0) {
       NativeEngine.clear(this.session);
       NativeEngine.takeCommitted(this.session);
@@ -292,6 +347,8 @@ export class Composer {
       suffix = rest;
     }
     this.raw = suffix;
+    // 【真机反馈 ⑨】串被截短（选词/引擎消费了一段）：光标意义已变，清掉回串尾模式。
+    this._cursor = -1;
   }
 
   private syncRaw(): void {

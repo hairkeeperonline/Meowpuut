@@ -57,6 +57,7 @@ class AbilityCallbacks implements KeyboardCallbacks {
   onPunctuation(mark: string): void { this.ability.onPunctuation(mark); }
   onToggleExpanded(): void { this.ability.onToggleExpanded(); }
   onPet(cat: string): void { this.ability.onPet(cat); }
+  onComposingCursor(pos: number): void { this.ability.onComposingCursor(pos); }
   onDragPanel(dx: number, dy: number): void { this.ability.dragPanel(dx, dy); }
   onHide(): void { this.ability.hideByPullDown(); }
   onPaste(): void { this.ability.pasteFromClipboard(); }
@@ -1311,6 +1312,13 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
     this.refreshKeyboard(true);
   }
 
+  /** 【真机反馈 ⑨】点组字串上的字符定位光标：写回 Composer、刷新候选栏光标竖线。 */
+  onComposingCursor(pos: number): void {
+    if (!this.composer.composing) return;
+    this.composer.cursor = pos;
+    this.refreshKeyboard();
+  }
+
   private onNeedMore(): void {
     if (this.composer.loadMore()) this.refreshKeyboard();
   }
@@ -1691,6 +1699,9 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
       this.composer.composing,
       this.mode === InputMode.PINYIN || this.mode === InputMode.PINYIN9,
       this.festivalTheme,
+      // 【真机反馈 ⑨】组字串 + 光标位传给键盘 UI 画在候选栏首位。
+      this.composer.composing ? this.composer.rawPreview : '',
+      this.composer.composing ? this.composer.cursor : -1,
     );
   }
 }

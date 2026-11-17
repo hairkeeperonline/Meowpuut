@@ -401,12 +401,12 @@ export class AlternatesStrip {
     const width = cell * options + 2 * AlternatesStrip.PADDING;
     const leftHalf = boxCenterX(key) < keyboardWidth / 2;
     const x = Math.min(Math.max(2, leftHalf ? key.left - 4 : boxRight(key) + 4 - width), keyboardWidth - 2 - width);
-    // 【真机反馈 round 60-2】第 0 行（九键「1」/符号页首行）长按时 strip 按键上方
-    // 排布会超出键区 Canvas（y<0）被裁掉，观感即「长按后看不到」。顶行的
-    // strip 翻到按键下方绘制（盖住第二行），永远留在 Canvas 内。
+    // 【真机反馈 ③】长按弹框方向不再「有时向上有时向下」：一律画在按键上方。
+    // 顶行（row 0）按键上方没有 50vp 空间时，strip 落到 y=2、盖住按键本体本身
+    // （对照 Gboard：顶行长按弹出物覆盖在键帽上，不会跑到下方打乱布局）。
+    // 原 round 60-2 的做法是顶行翻到下方，真机反馈方向不一致观感混乱。
     const STRIP_H = 50;
-    const aboveTop = key.top - STRIP_H - 4;
-    const y = aboveTop >= 4 ? aboveTop : key.bottom + 4;
+    const y = Math.max(2, key.top - STRIP_H - 4);
     return new AlternatesStrip(new Box(x, y, width, STRIP_H), cell, options, !leftHalf);
   }
 }
@@ -418,9 +418,9 @@ export class KeyBalloon {
     const height = idiom === Idiom.PHONE_LANDSCAPE ? 40 : 54;
     const width = Math.min(keyboardWidth - 4, key.width + 2 * flare);
     const x = Math.min(Math.max(2, boxCenterX(key) - width / 2), keyboardWidth - 2 - width);
-    // 顶行按键的气泡同样翻到下方绘制（strip 同理：避免超出键区 Canvas 被裁）。
-    const aboveTop = key.top - height + 2;
-    const y = aboveTop >= 2 ? aboveTop : key.bottom - 2;
+    // 【真机反馈 ③】与 AlternatesStrip 同步统一方向：一律在按键上方，
+    // 顶行 clamp 到 y=0 盖住按键本体，不再翻到下方。
+    const y = Math.max(0, key.top - height + 2);
     return new Box(x, y, width, height);
   }
 }

@@ -15,6 +15,7 @@ const SUITES = [
   { file: 'sim-a11y.mjs',        item: '②',     desc: '逐键无障碍虚拟节点' },
   { file: 'sim-shift.mjs',       item: '③',     desc: '物理 Shift/CapsLock 状态机' },
   { file: 'sim-mouse.mjs',       item: '④',     desc: '鼠标 hover/滚轮/右键路由' },
+  { file: 'sim-composing-cursor.mjs', item: '⑨', desc: '组字串光标定位/中退/中插' },
 ];
 
 const results = [];

@@ -74,27 +74,17 @@ struct SettingsPage {
     }
     const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
     this.prefs.init(ctx).then(() => {
-      this.mode = this.prefs.mode;
-      this.simplified = this.prefs.simplified;
-      this.shape = this.prefs.shape;
-      this.tone = this.prefs.tone;
-      this.palette = this.prefs.palette;
-      this.strength = this.prefs.strength;
-      this.cats = this.prefs.cats;
-      this.festivals = this.prefs.festivals;
-      this.haptics = this.prefs.haptics;
-      this.sound = this.prefs.sound;
-      this.keyPopups = this.prefs.keyPopups;
-      this.hapticStrength = this.prefs.hapticStrength;
-      this.keySound = this.prefs.keySound;
-      this.keySoundVolume = this.prefs.keySoundVolume;
-      this.keyboardHeight = this.prefs.keyboardHeight;
-      this.effects = this.prefs.effects;
-      this.keyboardPosition = this.prefs.keyboardPosition;
+      this.refreshFromPrefs();
       this.ready = true;
       // 【跨进程对齐兜底】设置加载完成后把整份当前值推给输入法进程：
       // IME 冷启动早于设置页打开时会落后，这里主动全量广播一次补齐。
       this.prefs.publishSnapshot();
+      // 【真机反馈 ⑤】订阅设置广播：键盘端（如点猫切换简/繁）改了值后，
+      // 公共事件会跨进程送到这里——设置页实时重读，不再是打开时读一次的快照。
+      // subscribe 的自环去重保证设置页自己的改动不会触发多余的回读。
+      this.prefs.subscribe(() => {
+        this.refreshFromPrefs();
+      });
     });
     this.loadPreviewCats();
     this.updateStatus();
@@ -108,6 +98,27 @@ struct SettingsPage {
     }
   }
 
+  /** 【真机反馈 ⑤】从 Prefs 重读全部值到页面状态（广播回调 + onPageShow 共用）。 */
+  private refreshFromPrefs(): void {
+    this.mode = this.prefs.mode;
+    this.simplified = this.prefs.simplified;
+    this.shape = this.prefs.shape;
+    this.tone = this.prefs.tone;
+    this.palette = this.prefs.palette;
+    this.strength = this.prefs.strength;
+    this.cats = this.prefs.cats;
+    this.festivals = this.prefs.festivals;
+    this.haptics = this.prefs.haptics;
+    this.sound = this.prefs.sound;
+    this.keyPopups = this.prefs.keyPopups;
+    this.hapticStrength = this.prefs.hapticStrength;
+    this.keySound = this.prefs.keySound;
+    this.keySoundVolume = this.prefs.keySoundVolume;
+    this.keyboardHeight = this.prefs.keyboardHeight;
+    this.effects = this.prefs.effects;
+    this.keyboardPosition = this.prefs.keyboardPosition;
+  }
+
   /** imeChange 回调：实例箭头函数保持稳定引用（off 时要用同一个函数）。 */
   private imeChangeCb: () => void = (): void => {
     this.updateStatus();
@@ -115,6 +126,9 @@ struct SettingsPage {
 
   onPageShow(): void {
     this.updateStatus();
+    // 【真机反馈 ⑤】回前台时也重读一次：广播订阅万一失败（低版本公共事件不可用），
+    // 这里保证至少切回来时能看到最新值（键盘端猫简繁切换等场景）。
+    if (this.ready) this.refreshFromPrefs();
   }
 
   aboutToDisappear(): void {

@@ -70,6 +70,7 @@ struct KeyboardPage {
         onPunctuationEvt: (mark: string) => this.host.callbacks?.onPunctuation(mark),
         onToggleExpandedEvt: () => this.host.callbacks?.onToggleExpanded(),
         onPetEvt: (cat: string) => this.host.callbacks?.onPet(cat),
+        onComposingCursorEvt: (pos: number) => this.host.callbacks?.onComposingCursor(pos),
         onHideEvt: () => this.host.callbacks?.onHide(),
       })
     }

@@ -126,8 +126,11 @@ export class Look {
     return this.effects === 'lightweight' ? 140 : 320;
   }
 
-  get keyboardTop(): string { return this.dark ? '#FF252428' : '#FFE9E8EF'; }
-  get keyboardBottom(): string { return this.dark ? '#FF1A191C' : '#FFD9D8E0'; }
+  // 【真机反馈 ②】键区背景压暗 ~10%：原来和键面（白 100%）亮度差只有 ~9%，
+  // 视觉上整片键区像一整块玻璃板。压暗后背景变成「托盘」，每个键帽的
+  // 玻璃渐变 + 软投影独立可见——「每个字符上一块玻璃板」。
+  get keyboardTop(): string { return this.dark ? '#FF1E1D21' : '#FFD6D3DE'; }
+  get keyboardBottom(): string { return this.dark ? '#FF161519' : '#FFC8C5D0'; }
   get keyFaceTop(): string { return this.dark ? '#FF636268' : '#FFFFFFFF'; }
   get keyFaceBottom(): string { return this.dark ? '#FF5A595F' : '#FFFAFAFC'; }
   get keyUtility(): string { return this.dark ? '#FF3C3B40' : '#FFCFCED8'; }
