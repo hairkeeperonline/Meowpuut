@@ -1764,3 +1764,14 @@ private static readonly WHEEL_DIRECTION = 1;
 1. **手指是否仍能正常打字**（`SourceType.Mouse` 过滤若过宽会导致手指全废，优先级最高）
 2. **滚轮方向**（决定 `WHEEL_DIRECTION` 取 +1 还是 −1）
 3. **滚轮步长手感**（一格 48vp 下，候选行/展开面板翻动是否合手；必要时调 `× 48` 的系数）
+### 追加：round 65 ④ 右键备选条缺鼠标悬停反馈
+
+**缺陷 K（④，条弹出后高亮永不更新）**：触控长按路径里，`KeyTouches.openAlternates` 在**按下瞬间**就按手指位置算好 `selected`，之后靠 `touch move` 持续更新。鼠标路径没有「按下不放」的阶段——右键是瞬时动作，条弹出后鼠标移动只走 `MouseAction.Move`，而初版 `handleKeyMouse` 只在**左键按下**时才处理备选条。结果是：**条能弹出来，但高亮永远停在初始那一格**，用户无法判断点下去会选中哪个字符，等于备选条失去了「可选」的意义。
+
+**修复**：`handleKeyMouse` 增加 `Move` 分支 → `hoverMouseAlternates(x, y)`：指针落在条矩形内时把 `a.selected` 移到对应格并重绘；落在条外则保持原高亮不动（与「鼠标移出条不应误改选择」的直觉一致）。`AlternatesStrip.indexAt` 内部已按 `mirrored` 处理镜像，左右翻转的条同样正确。
+
+初始高亮 `indexAt(boxCenterX(place.frame))` 与触控路径**逐参数一致**：`fromKey` 保证条覆盖按键上方，按键中心必然落在条内，所以初值天然指向手指/鼠标当前位置下方那一格。
+
+**构建**：`BUILD SUCCESSFUL in 19s 339ms`。
+
+**已知的轻微不一致（不修，记录在案）**：备选条打开期间键区 hover 高亮被刻意禁用（`handleKeyHover` 的 `!this.mouseAltActive` 守卫），鼠标移出条后原键的描边不会恢复，直到下一次移动。这是为了避免「条的高亮」与「键的描边」两个视觉焦点互相争抢，属于有意的取舍而非缺陷。

@@ -1200,6 +1200,14 @@ export struct MeowpuutKeyboard {
       this.openMouseAlternates(event.x, event.y);
       return;
     }
+    // 【round 65 ④ 修正】备选条开着时：鼠标移动要实时高亮将要选中的那一格。
+    // 触控路径在按下时就算好了 selected、之后靠 touch move 更新；鼠标没有「按下
+    // 不放」的阶段，若不做这一步，条虽然弹出来了但**永远停在初始高亮**，用户无法
+    // 判断松手会选中哪一格。
+    if (this.mouseAltActive && event.action === MouseAction.Move) {
+      this.hoverMouseAlternates(event.x, event.y);
+      return;
+    }
     // 左键：备选条开着时只用于选择/关闭。
     if (event.action === MouseAction.Press && event.button === MouseButton.Left &&
       this.mouseAltActive) {
@@ -1224,6 +1232,19 @@ export struct MeowpuutKeyboard {
       // 由 KeyTouches 自己决定「按住是删除重复还是滑选备选」。
       if (this.touches === null) return;
       this.touches.move(this.mousePointerId, event.x, event.y);
+    }
+  }
+
+  /** 鼠标在备选条上移动：把高亮移到指针所在格（条外则保持原高亮不动）。 */
+  private hoverMouseAlternates(x: number, y: number): void {
+    const a = this.alternates;
+    if (a === null) return;
+    const b = a.strip.box;
+    if (x < b.left || x >= b.left + b.width || y < b.top || y >= b.top + b.height) return;
+    const n = a.strip.indexAt(x);
+    if (n >= 0 && n < a.options.length && n !== a.selected) {
+      a.selected = n;
+      this.drawTick++;
     }
   }
 
