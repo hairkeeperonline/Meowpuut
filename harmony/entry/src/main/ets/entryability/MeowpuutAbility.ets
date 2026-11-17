@@ -1503,6 +1503,12 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
         this.refreshKeyboard();
       } else if (ev.action === Action.UP) {
         this.shiftHeld = false;
+        // 【round 65 ③ 修正】物理 Shift「点一下不按字就松手」必须回 OFF：
+        // DOWN 已把 caps 置为 ONCE，若不在此复位，松手后软键盘 shift 键会残留点亮、
+        // 下一个字母被意外大写（软键盘由 onShiftUp(typed=true) 承担这一步，物理路径
+        // 此前缺失）。用 releaseShift() 而**不是 reset()**——reset 会清掉 lastTap，
+        // 「点一下松手再点一下」就凑不成双击、LOCKED 永远进不去。
+        this.caps.releaseShift();
         hilog.info(0x0000, 'MeowpuutIME', `hwShift UP -> caps=${this.caps.state}`);
         this.refreshKeyboard();
       }

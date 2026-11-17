@@ -68,6 +68,18 @@ export class Capitalization {
     }
   }
 
+  /**
+   * 【round 65 ③】物理 Shift 松手复位：ONCE → OFF，但**保留 lastTap**。
+   * 不能用 reset()——那会清掉 lastTap，导致「点一下松手、再点一下」永远
+   * 凑不成双击、LOCKED 永远进不去。这里只撤销「松手后不应残留大写」的问题。
+   */
+  releaseShift(): void {
+    if (this._state === ShiftState.ONCE) {
+      this._state = ShiftState.OFF;
+      this.manual = false;
+    }
+  }
+
   static readonly DOUBLE_TAP_MS = 300;
 }
 

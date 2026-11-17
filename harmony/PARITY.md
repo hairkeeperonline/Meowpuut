@@ -1694,3 +1694,19 @@ if (this.composer.composing && this.lastPreviewAt > 0 &&
 三处均属「照记忆/直觉实现」与「源码既有约定」的偏差，正是真机才会暴露、但静态审查可以提前拦住的那类问题。**修复后 `BUILD SUCCESSFUL in 19s 975ms`。**
 
 **真机验收状态**：仍为**未验证**——`hdc list targets` 依旧只有 `COM3~COM6`（UART）。
+### 追加：round 65 ③ 静态审查发现并修复的两处状态机缺陷
+
+审查 ③ 的 Shift 状态机时发现两处会让物理 Shift 行为不正确的问题：
+
+**缺陷 D（③，松手不复位 → 残留大写）**：软键盘走 `onShiftDown/onShiftUp(typed)` 成对处理，UP 时会 `if (typed && state !== LOCKED) caps.reset()`。物理路径初版只做了 `shiftHeld = false`，没有复位 `caps`——`KEYCODE_SHIFT` DOWN 已把状态推到 ONCE，松手后软键盘 shift 键**残留点亮**，用户没打算大写却被意外大写。**修复**：UP 时调用 `caps.releaseShift()`。
+
+**缺陷 E（③，双击与复位的冲突 —— 修复 D 时自己引入又立即发现）**：第一版修复直接用 `caps.reset()`。但 `reset()` 会清掉 `lastTap`，而双击判定完全依赖 `lastTap`——「点一下松手、再点一下」的第二次 `tap` 看不到时间戳，**LOCKED 永远进不去**，双击锁定与「单击一次大写」会退化成同一行为。**修复**：新增 `Capitalization.releaseShift()`，只做 ONCE → OFF，**保留 `lastTap`**；`reset()` 语义保持为「整体清空」不变。
+
+修正后的完整时序（三种路径均自洽）：
+- **单击松手**：DOWN `tap` → ONCE（记 `lastTap`）；UP `releaseShift` → OFF（留 `lastTap`）✓
+- **双击**：第一次 DOWN→ONCE / UP→OFF（留 `lastTap`）；第二次 DOWN 距首次 ≤300ms → `tap` 命中双击分支 → **LOCKED** ✓
+- **解除锁定**：LOCKED 态再按一次 → `tap` 的 `case LOCKED` → OFF ✓
+
+**仍属静态推理，未经真机验证**：`uitest uiInput keyEvent 2047` 注入的是 DOWN+UP 成对事件，恰好是验证本修复最直接的手段；但双击时序需要两次带间隔的注入，`uitest` 的单次 keyEvent 无法控制间隔，需真机配合 `uinput` 或自定义注入脚本——这一条在验收时须单独设计。
+
+**构建**：`BUILD SUCCESSFUL in 18s 722ms`。
