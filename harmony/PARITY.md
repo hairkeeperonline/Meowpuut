@@ -1806,3 +1806,36 @@ private static readonly WHEEL_DIRECTION = 1;
 这两处都是「测试写错 → 差点误判代码有 bug」的典型，说明仿真本身也需要被审视。
 
 **仿真覆盖不到的部分（必须真机）**：`OffscreenCanvas` 的实际像素输出、`drawImage(ImageBitmap)` 的像素语义、`accessibilityVirtualNode` 是否真进 a11y 树、`onMouse/onAxisEvent` 的真实投递与坐标、物理 Shift 注入后软键盘是否点亮。以上只能上机。
+### 追加：round 65 ③ Shift 状态机离线仿真（30 项断言全过）
+
+承接上一条，把 ③ 的状态机也做成可执行仿真：`KeyStates.Capitalization` + `MeowpuutAbility` 的物理键处理器 + `shift` getter 逐行移植到 Node。脚本 `harmony/tools/sim-shift.mjs`（`node tools/sim-shift.mjs`，全过退出码 0）。
+
+**覆盖的 11 类时序（30 项断言）**：
+
+| # | 场景 | 结论 |
+| --- | --- | --- |
+| 1 | 物理 Shift 单击 | 按下 ONCE → 松手 OFF（**缺陷 D 修复目标达成**） |
+| 2 | 按住 Shift 连打 | 按住期间恒 ONCE，连打多个大写（符合物理键盘直觉），松手回 OFF |
+| 3 | 物理 Shift 双击 | 300ms 内二次按下 → **LOCKED**，松手与打字均不受影响（**缺陷 E 修复目标达成**） |
+| 4 | 双击窗口外 | 400ms 二次按下只到 ONCE，不误锁 |
+| 5 | **反证缺陷 E** | 用 `reset()` 的版本第二次按下**无法进入 LOCKED**（got ONCE）——证明当时的修复确有必要 |
+| 6 | CapsLock 拨动 | LOCKED → OFF → LOCKED 循环正确 |
+| 7 | LOCKED 下按 Shift | caps 解除锁定，但按住期间 getter 返回 ONCE（见下） |
+| 8 | 软键盘 vs 物理差异 | 语义不同，**有意为之**（见下） |
+| 9 | 新输入会话 | 不继承物理锁定，从 OFF 开始 |
+| 10 | 状态完备性 | 300 条随机序列 × 60 步，状态恒为三值之一，无矛盾态 |
+| 11 | 时间倒退 | `now >= lastTap` 守卫生效，不误锁 |
+
+**仿真再次纠正了我的两个错误断言（都是把「不同语义」误当成「应该一致」）**：
+
+1. **第 7 项**：我原断言「LOCKED 下按 Shift 应直接回 OFF」。实际 `tap` 确把 caps 解除为 OFF，但同一时刻 `shiftHeld = true`，`shift` getter 按设计返回 ONCE。**这才是对的**——用户正**按着** Shift，软键盘就该提示大写。断言已改为「caps 内部解除锁定 + getter 返回 ONCE」两条分别验证。
+
+2. **第 8 项**：我原断言「软键盘与物理路径松手后行为应一致」。**这是错的**，两者语义本就不同：
+   - **软键盘**：点一下锁定下一个字母 → 松手（`typed=false`）**必须保留 ONCE**，等下一个字母由 `letterTyped()` 清掉；
+   - **物理 Shift**：按住才生效 → 松手**必须立刻回 OFF**，否则残留大写（正是缺陷 D）。
+   
+   强行要求一致会把其中一方改坏。断言已改为分别验证各自语义，并补充「软键盘打完字松手 → OFF」一条。
+
+**再次印证**：仿真最大的价值不只是验证代码，而是**暴露我自己对需求语义的理解偏差**。上一轮抓了两处，这一轮又抓了两处。
+
+**仍无法由仿真覆盖**：`uitest` 注入的 `KEYCODE_SHIFT` 是否真能到达 `hwDelegate.on('keyEvent')`、系统 shift 修饰态是否让后续字母变为大写（`unicodeChar`）、软键盘 shift 图标在真机上的点亮像素。以上只能上机。
