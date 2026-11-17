@@ -1487,13 +1487,41 @@ export default class MeowpuutAbility extends InputMethodExtensionAbility {
    * 返回 true 表示事件被消费，false 表示交还系统默认处理。
    */
   private hardwareKeyEvent(ev: InputKeyEvent): boolean {
+    const keyCode = ev.key.code;
+    // 【round 65 ③】物理 Shift / CapsLock ↔ 软键盘 shift 键同步（对照安卓物理键盘
+    // Shift 行为 + 软键盘手感）：必须在 english/组合键守卫与 UP 早退之前处理——
+    // english 模式下软键盘同样显示 shift 状态，也要点亮。
+    // 均返回 false 不消费：系统要维护 shift 修饰态（决定后续字母 unicodeChar 的大小写，
+    // 消费掉会导致物理 Shift+字母打不出大写）。
+    if (!ev.ctrlKey && !ev.altKey && !ev.logoKey &&
+      (keyCode === KeyCode.KEYCODE_SHIFT_LEFT || keyCode === KeyCode.KEYCODE_SHIFT_RIGHT)) {
+      if (ev.action === Action.DOWN) {
+        // 单击=ONCE、双击窗口(300ms)内=LOCKED：与软键盘 shift 键同一 Capitalization 时序。
+        this.caps.tap(Date.now());
+        this.shiftHeld = true;
+        hilog.info(0x0000, 'MeowpuutIME', `hwShift DOWN -> caps=${this.caps.state}`);
+        this.refreshKeyboard();
+      } else if (ev.action === Action.UP) {
+        this.shiftHeld = false;
+        hilog.info(0x0000, 'MeowpuutIME', `hwShift UP -> caps=${this.caps.state}`);
+        this.refreshKeyboard();
+      }
+      return false;
+    }
+    if (!ev.ctrlKey && !ev.altKey && !ev.logoKey &&
+      keyCode === KeyCode.KEYCODE_CAPS_LOCK && ev.action === Action.DOWN) {
+      // 物理 CapsLock 是拨动开关：LOCKED ↔ OFF（软键盘 shift 键显示锁定/熄灭）。
+      this.caps.setLocked(this.caps.state !== ShiftState.LOCKED);
+      hilog.info(0x0000, 'MeowpuutIME', `hwCapsLock DOWN -> caps=${this.caps.state}`);
+      this.refreshKeyboard();
+      return false;
+    }
     if (ev.action === Action.UP) {
       const code = ev.key.code;
       const consumed = this.consumedKeys.delete(code);
       return consumed;
     }
     if (ev.action !== Action.DOWN) return false;
-    const keyCode = ev.key.code;
     // Ctrl/Alt/Logo(meta) 组合键交还系统（对应 Android 的 isCtrlPressed/isAltPressed/isMetaPressed）。
     if (ev.ctrlKey || ev.altKey || ev.logoKey || this.english) return false;
     const composing = this.composer.composing;

@@ -2,11 +2,11 @@
  * 键盘 ArkUI 组件（对应 Android ime/KeyboardView.kt + KeysView.kt + CandidateBarView.kt 的合并）。
  * 用 Canvas 绘制候选栏玻璃、键盘按键与猫咪；触控交给 KeyTouches 状态机。
  */
-import { Box, keyMetricsOf, keyMetricsFitted, layoutKeyGrid, Idiom, resolveIdiom,
+import { Box, boxCenterX, keyMetricsOf, keyMetricsFitted, layoutKeyGrid, Idiom, resolveIdiom,
   CandidateRegionLayout, KeyPlacement, KeyBalloon, AlternatesStrip, KeyMetrics } from './Geometry';
 import { Key, KeySet, KeyIcon, KeyStyle, KeyBuilder, KeyContext, ShiftState } from './Keys';
 import { KeyTouches, KeyListener, TouchHost } from './KeyTouches';
-import { GlassPainter, PillPainter, roundRect, Glyphs, tracePath } from './Painting';
+import { GlassPainter, PillPainter, roundRect, Glyphs, tracePath, Canvas2D } from './Painting';
 import { Look, withAlpha, lighten, isLowercase, Palette, GlassStrength } from './Theme';
 import { GlassShape, contentBand , glassTop } from './GlassOutline';
 import { CatSeats, CatStage, Cat, CatPlacement } from './CatStage';
@@ -203,6 +203,31 @@ class PanelCell {
   }
 }
 
+/**
+ * 【round 65 ②】无障碍虚拟节点描述（对应 Android VirtualAccessibility.accessibleKeys
+ * 的 spoken/label/enabled/Rect）：Canvas 自绘键位不进 a11y 树，用
+ * accessibilityVirtualNode 的占位组件按 frame 坐标补齐语义层。
+ */
+class A11yNode {
+  id: string;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  spoken: string;
+  enabled: boolean;
+  constructor(id: string, left: number, top: number, width: number, height: number,
+    spoken: string, enabled: boolean) {
+    this.id = id;
+    this.left = left;
+    this.top = top;
+    this.width = width;
+    this.height = height;
+    this.spoken = spoken;
+    this.enabled = enabled;
+  }
+}
+
 @Component
 export struct MeowpuutKeyboard {
   /** 键盘向外发送动作的回调。 */
@@ -338,6 +363,35 @@ export struct MeowpuutKeyboard {
   private panelVel: number = 0;
   private panelLastY: number = 0;
   private panelLastT: number = 0;
+
+  // ------------------------------------------------------------------
+  // 【round 65 ①】玻璃静态层离屏缓存：shadow/body/pawShadows/节日簇一帧 ~2800 个
+  // Point2D 分配 + 数十次路径填充，全部只随 (宽,高,Look 引用,猫开关,节日,贴图就绪)
+  // 变化——画进 OffscreenCanvas 缓存成 ImageBitmap，命中时一次 drawImage 贴图。
+  // ------------------------------------------------------------------
+  private glassCacheBitmap: ImageBitmap | null = null;
+  private glassCacheCtx: OffscreenCanvasRenderingContext2D | null = null;
+  private glassCacheKey: string = '';
+  private glassCacheLook: Look | null = null;
+  private glassCacheW: number = -1;
+  private glassCacheH: number = -1;
+  private glassCacheLogged: boolean = false;
+
+  // ------------------------------------------------------------------
+  // 【round 65 ④】鼠标：hover 高亮 / 右键备选条 / 滚轮。
+  // ------------------------------------------------------------------
+  /** 当前 hover 的键（-1 = 无）；仅重画键区，不动候选栏。 */
+  private hoverRow: number = -1;
+  private hoverCol: number = -1;
+  /** 鼠标右键打开的备选条是否活跃（活跃期间左键点击只用于选择/关闭，不进按键触控）。 */
+  private mouseAltActive: boolean = false;
+  private mouseAltKey: Key | null = null;
+
+  // ------------------------------------------------------------------
+  // 【round 65 ②】逐键无障碍虚拟节点（@State 驱动 accessibilityVirtualNode 的 ForEach）。
+  // ------------------------------------------------------------------
+  @State private a11yKeyNodes: A11yNode[] = [];
+  private a11ySig: string = '';
 
   aboutToAppear(): void {
     this.touches = new KeyTouches(this.host());
@@ -753,6 +807,11 @@ export struct MeowpuutKeyboard {
     const ctx = this.state.keyCtx;
     // 【优化 round 64】布局重建时失效像素比缓存（兜底：跨屏迁移/旋转后 density 可能变化）。
     this.cachedPxRatio = -1;
+    // 【round 65 ①】密度可能变化 → 离屏玻璃位图分辨率要跟着变，键失效强制重渲染。
+    this.glassCacheKey = '';
+    // 【round 65 ④】布局/状态重建：鼠标备选条与 hover 高亮作废（键位可能已换位）。
+    this.closeMouseAlternates();
+    if (this.hoverRow !== -1) { this.hoverRow = -1; this.hoverCol = -1; }
     // 组字状态变化时，猫向候选方向倾斜（对照 Android animateLean，320ms 缓动）。
     if (this.state.composing !== this.lastComposing) {
       this.lastComposing = this.state.composing;
@@ -780,6 +839,8 @@ export struct MeowpuutKeyboard {
     this.placements = layoutKeyGrid(keySet.specs, this.kbWidth, keySet.referenceColumns, this.metrics,
       keySet.maximumWidth !== null ? keySet.maximumWidth : 0);
     this.touches?.layout(keySet, this.placements, this.kbWidth, true);
+    // 【round 65 ②】键位几何定了，刷新逐键虚拟节点（展开态候选格在 drawPanel 里补）。
+    this.updateA11yKeyNodes();
     // rebuild 会把 metrics 重置成固定键高，这里立刻补一次撑满，否则轮询刷新后面板底部又出现死区。
     this.drawTick++;
   }
@@ -877,6 +938,13 @@ export struct MeowpuutKeyboard {
         .onTouch((event: TouchEvent) => {
           this.handleBarTouch(event);
         })
+        // 【round 65 ④】鼠标滚轮 → 候选行横向滚动（键盘/平板场景）。
+        .onAxisEvent((event: AxisEvent) => {
+          this.handleBarWheel(event);
+        })
+        // 【round 65 ②】候选栏整体语义（逐项候选朗读在展开面板的虚拟节点里）。
+        .accessibilityGroup(true)
+        .accessibilityText('喵扑输入键盘候选栏')
 
       // 键盘按键：用 layoutWeight 撑满候选栏之外的剩余空间，
       // 否则固定键高会在面板底部留一条点不到的死区。
@@ -891,6 +959,23 @@ export struct MeowpuutKeyboard {
         .onTouch((event: TouchEvent) => {
           this.handleTouch(event);
         })
+        // 【round 65 ④】鼠标 hover：按键描边高亮（移出/展开面板态清除）。
+        .onHover((isHover: boolean, event: HoverEvent) => {
+          this.handleKeyHover(isHover, event);
+        })
+        // 【round 65 ④】鼠标按键：右键弹长按备选条（复用 AlternatesStrip/KeyBalloon 绘制），
+        // 左键在备选条打开时用于选择/关闭。
+        .onMouse((event: MouseEvent) => {
+          this.handleKeyMouse(event);
+        })
+        // 【round 65 ④】鼠标滚轮：展开面板态纵向滚候选格。
+        .onAxisEvent((event: AxisEvent) => {
+          this.handleKeyWheel(event);
+        })
+        // 【round 65 ②】逐键无障碍虚拟节点（对照 Android VirtualAccessibility.accessibleKeys）：
+        // Canvas 自绘键位不进 a11y 树，用等位等大、只排版不显示的占位组件补语义层，
+        // 每键 spoken/enabled 与展开面板候选格都可被读屏逐键聚焦。
+        .accessibilityVirtualNode(this.a11yKeysBuilder)
     }
     .width('100%')
     // 【round 64 真机修复·悬浮底行截断】根布局必须显式占满父容器「扣除把手后」的
@@ -901,11 +986,9 @@ export struct MeowpuutKeyboard {
     // 贴底态无把手、约束恰好等于面板高，故历史版贴底正常、悬浮截断。
     // layoutWeight(1) 使根 Column = 父高-把手，键区画布随之回到自洽数值。
     .layoutWeight(1)
-    // 无障碍基础落地：整块键盘对屏幕阅读器可识别。逐键虚拟节点
-    // （对应 Android VirtualAccessibility）需叠加透明语义层 + 真机 TalkBack
-    // 验证，见 PARITY.md。
-    .accessibilityGroup(true)
-    .accessibilityText('喵扑输入键盘')
+    // 【round 65 ②】根容器不再整块 accessibilityGroup：那会把所有子节点合并成
+    // 一句「喵扑输入键盘」，逐键虚拟节点将无法被读屏访问。语义分组下放到
+    // 两块 Canvas（候选栏=组、键区=逐键虚拟节点）。
     // 【全键盘下拉收起】（真机反馈 round 60-5）：手指没按在按键上时，竖向
     // 下拉超过 56vp 即收起键盘 —— 不再局限于候选栏（原来区域小很难选中）。
     // 起点在按键上（含字符键、删除、空格等）不触发；展开面板滚动态不触发。
@@ -937,6 +1020,27 @@ export struct MeowpuutKeyboard {
         this.drawTick++;
       }
     })
+  }
+
+  /**
+   * 【round 65 ②】逐键虚拟节点 builder：a11yKeyNodes 每项按 frame 坐标摆一个
+   * 等位等大、只参与排版不显示的占位组件，accessibilityText=spoken、
+   * enabled 跟随键的可用态（对照 Android accessibleKeys 的 Rect/spoken/enabled）。
+   */
+  @Builder
+  a11yKeysBuilder() {
+    Stack({ alignContent: Alignment.TopStart }) {
+      ForEach(this.a11yKeyNodes, (n: A11yNode) => {
+        Column()
+          .width(n.width)
+          .height(n.height)
+          .position({ x: n.left, y: n.top })
+          .enabled(n.enabled)
+          .accessibilityText(n.spoken)
+      }, (n: A11yNode) => n.id)
+    }
+    .width('100%')
+    .height('100%')
   }
 
   // ---------------------------------------------------------------- 触控
@@ -973,6 +1077,14 @@ export struct MeowpuutKeyboard {
   /** 键区按键触控（从 handleTouch 拆出：展开态底行与常态共用）。 */
   private handleKeysTouch(event: TouchEvent): void {
     if (this.touches === null) return;
+    // 【round 65 ④】鼠标右键备选条打开期间：触点/左键全部转为备选条的
+    // 选择/关闭语义，不进按键状态机（否则条下方的键会被误提交）。
+    if (this.mouseAltActive) {
+      for (const change of event.changedTouches) {
+        if (change.type === TouchType.Down) this.resolveMouseAlternates(change.x, change.y);
+      }
+      return;
+    }
     for (const change of event.changedTouches) {
       const x = change.x;
       const y = change.y;
@@ -984,6 +1096,239 @@ export struct MeowpuutKeyboard {
       } else if (change.type === TouchType.Up || change.type === TouchType.Cancel) {
         this.touches.up(change.id, x, y);
       }
+    }
+  }
+
+  // ---------------------------------------------------------------- 鼠标（round 65 ④）
+
+  /**
+   * 按坐标命中键（复刻 KeyTouches.keyAt 的命中规则：底行向下延伸到画布底缘，
+   * 消除面板底部死区）。返回 [row, col]，未命中返回 null。
+   */
+  private keyPlacementAt(x: number, y: number): number[] | null {
+    const keySet = this.keySet;
+    if (keySet === null || keySet.rows.length === 0) return null;
+    const rows = keySet.rows.length;
+    const lastRow = rows - 1;
+    for (let r = 0; r < rows; r++) {
+      let top = Number.MAX_VALUE;
+      let bottom = -Number.MAX_VALUE;
+      const rowPlaces = this.placements[r];
+      if (rowPlaces === undefined) continue;
+      for (const place of rowPlaces) {
+        if (place === undefined) continue;
+        top = Math.min(top, place.frame.top);
+        bottom = Math.max(bottom, place.frame.top + place.frame.height);
+      }
+      if (x < 0 || x >= this.kbWidth) continue;
+      if (r === lastRow) {
+        if (y >= top) return [r, this.columnAt(rowPlaces, x)];
+        continue;
+      }
+      if (y >= top && y < bottom) return [r, this.columnAt(rowPlaces, x)];
+    }
+    return null;
+  }
+
+  private columnAt(rowPlaces: KeyPlacement[], x: number): number {
+    for (let c = 0; c < rowPlaces.length; c++) {
+      const place = rowPlaces[c];
+      if (place === undefined) continue;
+      const f = place.frame;
+      if (x >= f.left && x < f.left + f.width) return c;
+    }
+    return -1;
+  }
+
+  /** 鼠标 hover：按键描边高亮（移出/展开面板态清除）。 */
+  private handleKeyHover(isHover: boolean, event: HoverEvent): void {
+    let row = -1;
+    let col = -1;
+    if (isHover && !this.mouseAltActive && !(this.state.expanded && this.state.composing)) {
+      const x = event.x;
+      const y = event.y;
+      if (x !== undefined && y !== undefined) {
+        const hit = this.keyPlacementAt(x, y);
+        if (hit !== null) {
+          row = hit[0];
+          col = hit[1];
+          let key: Key | undefined = undefined;
+          if (this.keySet !== null && col >= 0) {
+            const rowKeys = this.keySet.rows[row];
+            if (rowKeys !== undefined) key = rowKeys[col];
+          }
+          if (key === undefined || !key.enabled) { row = -1; col = -1; }
+        }
+      }
+    }
+    if (row === this.hoverRow && col === this.hoverCol) return;
+    this.hoverRow = row;
+    this.hoverCol = col;
+    // 只重画键区（hover 高亮只画在键帽上），不动候选栏。
+    if (this.keysReady) this.drawKeys();
+  }
+
+  /** 鼠标按键：右键弹备选条；左键在条打开时选择/关闭（onTouch 路径同语义兜底）。 */
+  private handleKeyMouse(event: MouseEvent): void {
+    if (event.action === MouseAction.Press && event.button === MouseButton.Right) {
+      this.openMouseAlternates(event.x, event.y);
+      return;
+    }
+    if (event.action === MouseAction.Press && event.button === MouseButton.Left &&
+      this.mouseAltActive) {
+      this.resolveMouseAlternates(event.x, event.y);
+    }
+  }
+
+  /** 右键 = 直接弹长按备选气泡条（对照 KeyTouches.showAlternates 的产物）。 */
+  private openMouseAlternates(x: number, y: number): void {
+    if (this.mouseAltActive) {
+      // 已开着：右键再点视为关闭/切换（先关再尝试开新键）。
+      this.resolveMouseAlternates(-1, -1);
+    }
+    if (this.state.expanded && this.state.composing) return;
+    if (this.alternates !== null) return; // 触控长按的备选条在显示中，不打架
+    const hit = this.keyPlacementAt(x, y);
+    if (hit === null) return;
+    const row = hit[0];
+    const col = hit[1];
+    if (col < 0 || this.keySet === null) return;
+    const rowKeys = this.keySet.rows[row];
+    const rowPlaces = this.placements[row];
+    if (rowKeys === undefined || rowPlaces === undefined) return;
+    const key = rowKeys[col];
+    const place = rowPlaces[col];
+    if (key === undefined || place === undefined || !key.enabled) return;
+    const options = key.alternates;
+    if (options.length === 0) return;
+    const strip = AlternatesStrip.fromKey(place.frame, options.length, this.kbWidth);
+    this.alternates = new AlternatesState(strip, options, strip.indexAt(boxCenterX(place.frame)));
+    this.mouseAltActive = true;
+    this.mouseAltKey = key;
+    hilog.info(0x0000, 'MeowpuutMouse',
+      `rightClick alternates: key=${key.label} options=${options.length}`);
+    this.drawTick++;
+  }
+
+  /** 备选条打开时的左键落点：命中选项即提交，否则关闭。 */
+  private resolveMouseAlternates(x: number, y: number): void {
+    const a = this.alternates;
+    const key = this.mouseAltKey;
+    this.mouseAltActive = false;
+    this.mouseAltKey = null;
+    if (a === null || key === null) {
+      this.drawTick++;
+      return;
+    }
+    // 命中判定与触控长按同一套几何：点在条内才取列号，条外（含 -1,-1 的取消）不提交。
+    let n = -1;
+    const b = a.strip.box;
+    if (x >= b.left && x < b.left + b.width && y >= b.top && y < b.top + b.height) {
+      n = a.strip.indexAt(x);
+    }
+    this.alternates = null;
+    if (n >= 0 && n < a.options.length) {
+      hilog.info(0x0000, 'MeowpuutMouse', `alternates pick: ${a.options[n]}`);
+      this.onKeyEvt?.(key, a.options[n]);
+    }
+    this.drawTick++;
+  }
+
+  /** 关闭鼠标备选条（状态重建/布局变化时调用，防悬空条）。 */
+  private closeMouseAlternates(): void {
+    if (this.mouseAltActive) {
+      this.mouseAltActive = false;
+      this.mouseAltKey = null;
+      this.alternates = null;
+    }
+  }
+
+  /** 滚轮位移换算：垂直轴值(vp)，鼠标滚轮无轴值时按 scrollStep 折算一格。 */
+  private static axisDelta(event: AxisEvent): number {
+    let v = 0;
+    try {
+      v = event.getVerticalAxisValue();
+    } catch (e) {
+      v = 0;
+    }
+    if (v === 0) {
+      const s = event.scrollStep;
+      if (s !== undefined && s !== 0) v = s > 0 ? 48 : -48;
+    }
+    // 一格滚轮 ≈ 48vp（候选 1~2 个 / 面板一行），真机手感可调。
+    return Math.round(v * 48 / 15);
+  }
+
+  /** 键区滚轮：展开面板态纵向滚候选格；常态不打扰按键（不透传候选栏）。 */
+  private handleKeyWheel(event: AxisEvent): void {
+    const dy = MeowpuutKeyboard.axisDelta(event);
+    if (dy === 0) return;
+    if (this.state.expanded && this.state.composing) {
+      const next = Math.max(0, Math.min(this.panelMaxScroll(), this.panelScroll + dy));
+      if (next !== this.panelScroll) {
+        this.panelScroll = next;
+        this.drawTick++;
+      }
+    }
+  }
+
+  /** 候选栏滚轮：垂直滚动 → 候选行横向平移（对照 Android 鼠标滚轮滚候选）。 */
+  private handleBarWheel(event: AxisEvent): void {
+    let dy = MeowpuutKeyboard.axisDelta(event);
+    if (dy === 0) return;
+    // 触摸板横向轴直接映射（Shift+滚轮同理）。
+    try {
+      const hx = event.getHorizontalAxisValue();
+      if (hx !== 0) dy = Math.round(hx * 48 / 15);
+    } catch (e) { /* 无横向轴用垂直值 */ }
+    const next = Math.max(0, Math.min(this.barMaxScroll, this.barScroll + dy));
+    if (next !== this.barScroll) {
+      this.barScroll = next;
+      this.drawTick++;
+    }
+  }
+
+  // ---------------------------------------------------------------- 无障碍（round 65 ②）
+
+  /**
+   * 重建逐键虚拟节点（对照 Android VirtualAccessibility.accessibleKeys：
+   * 每键 Rect/spoken/enabled；展开面板态朗读候选格 + 底行键）。
+   * 用签名对比避免无变化时触发 @State 重建虚拟节点树。
+   */
+  private updateA11yKeyNodes(): void {
+    const nodes: A11yNode[] = [];
+    const expanded = this.state.expanded && this.state.composing;
+    const keySet = this.keySet;
+    if (keySet !== null && this.placements.length > 0) {
+      // 展开态只暴露底行键（上面的行被面板盖住，对照 drawKeys 的 rowStart）。
+      const startRow = expanded ? keySet.rows.length - 1 : 0;
+      for (let r = startRow; r < keySet.rows.length; r++) {
+        const rowKeys = keySet.rows[r];
+        const rowPlaces = this.placements[r];
+        if (rowPlaces === undefined) continue;
+        for (let c = 0; c < rowKeys.length; c++) {
+          const key = rowKeys[c];
+          const place = rowPlaces[c];
+          if (place === undefined) continue;
+          const spoken = key.spoken.length > 0 ? key.spoken : key.label;
+          nodes.push(new A11yNode(`k${r}_${c}`, place.frame.left, place.frame.top,
+            place.frame.width, place.frame.height, spoken, key.enabled));
+        }
+      }
+    }
+    if (expanded) {
+      for (const cell of this.panelCells) {
+        nodes.push(new A11yNode(`p${cell.index}_${Math.round(cell.left)}_${Math.round(cell.top)}`,
+          cell.left, cell.top, cell.width, MeowpuutKeyboard.PANEL_ROW, cell.shown, true));
+      }
+    }
+    let sig = '';
+    for (const n of nodes) {
+      sig += `${n.id}|${Math.round(n.left)}|${Math.round(n.top)}|${Math.round(n.width)}|${n.spoken}|${n.enabled ? 1 : 0};`;
+    }
+    if (sig !== this.a11ySig) {
+      this.a11ySig = sig;
+      this.a11yKeyNodes = nodes;
     }
   }
 
@@ -1247,25 +1592,54 @@ export struct MeowpuutKeyboard {
     // 玻璃带与猫直接浮在输入法面板上、透出底层应用（不随深浅色变化）。
     // 键区地板渐变仍在 drawKeys 里绘制（造型轮廓在那边）。
 
-    // 玻璃。
-    GlassPainter.shadow(ctx, look.shape, region.glass, look.dark);
-    GlassPainter.body(ctx, look.shape, region.glass, look);
-    // 【优化 round 64】seats 一帧只算一次，传参给爪影/猫/粒子（原先每处各自调
-    // this.seats()，一帧最多 3 次重复落座计算）；座位几何只依赖 region/look/festival，
-    // 同帧内恒相同，复用结果像素不变。
     const showCats = region.cats && look.cats;
-    const seats: CatPlacement[] = showCats ? this.seats(region, look) : [];
-    // 爪子在玻璃上的软阴影（对照 Android pawShadows，画进玻璃体之后）。
-    if (showCats) {
-      this.pawShadows(ctx, region, look, seats);
+    const festival = this.state.festival;
+    // 节日贴图异步加载：先触发加载（内部有守卫），就绪状态参与缓存键——
+    // 贴图到位后 key 变化 → 静态层自动重渲染。
+    if (festival !== null) this.loadFestivalArt(festival);
+
+    // 【round 65 ①】玻璃静态层（shadow/body/爪影/节日簇）走离屏缓存：
+    // 只在 (宽,高,idiom,猫开关,节日,贴图就绪,Look 引用) 变化时重画，
+    // 命中时一次 drawImage——消除每帧 ~2800 个 Point2D 分配与数十次路径填充。
+    const festArtReady = festival !== null && festival.right !== null &&
+      this.festivalPixels.has(festival.right.image) ? '1' : '0';
+    const cacheKey = `${w}x${h}|${this.idiom}|${showCats ? 1 : 0}|` +
+      `${festival !== null ? festival.id : '-'}|${this.festivalLoadedId}|${festArtReady}`;
+    let bmp = this.glassCacheBitmap;
+    if (bmp === null || cacheKey !== this.glassCacheKey || this.glassCacheLook !== look) {
+      const fresh = this.renderGlassCache(w, h, region, look, showCats, festival);
+      if (fresh !== null) {
+        const old = this.glassCacheBitmap;
+        this.glassCacheBitmap = fresh;
+        this.glassCacheKey = cacheKey;
+        this.glassCacheLook = look;
+        if (old !== null && old !== fresh) {
+          try { old.close(); } catch (e) { /* 已释放则忽略 */ }
+        }
+        bmp = fresh;
+        if (!this.glassCacheLogged) {
+          this.glassCacheLogged = true;
+          // 【真机取证】离屏位图的像素尺寸 vs vp 尺寸：决定 drawImage dest 语义
+          // （round 64 实测 PixelMap 的 dest 宽高按物理像素解释）。
+          hilog.info(0x0000, 'MeowpuutGlass',
+            `glass cache rendered: vp=${w}x${h} bmp=${fresh.width}x${fresh.height} k=${this.pxRatio()}`);
+        }
+      }
+    }
+    if (bmp !== null) {
+      // dest 宽高传位图自身像素尺寸 = 1:1 物理像素回贴（位置仍按 vp 语义 (0,0)）。
+      ctx.drawImage(bmp, 0, 0, bmp.width, bmp.height);
+    } else {
+      // 离屏路径异常时回退直绘（保视觉永不丢；hilog 已在 renderGlassCache 里告警）。
+      GlassPainter.shadow(ctx, look.shape, region.glass, look.dark);
+      GlassPainter.body(ctx, look.shape, region.glass, look);
+      if (showCats) this.pawShadows(ctx, region, look, this.seats(region, look));
+      if (festival !== null) this.drawFestivalEnd(ctx, region, look);
     }
 
-    // 节日：加载换装猫/饰簇贴图，然后画右端饰簇（玻璃上、猫与候选下）。
-    const festival = this.state.festival;
-    if (festival !== null) {
-      this.loadFestivalArt(festival);
-      this.drawFestivalEnd(ctx, region, look);
-    }
+    // 【优化 round 64】seats 一帧只算一次，传参给猫/粒子（座位几何只依赖
+    // region/look/festival，同帧内恒相同，复用结果像素不变）。
+    const seats: CatPlacement[] = showCats ? this.seats(region, look) : [];
 
     // 【纯净版】柔光带暂时停用：真机反馈它在候选栏上形成一块白斑观感。
     // 先确认两只猫能完整、清晰地显示出来，之后再决定是否以更淡的方式恢复。
@@ -1288,6 +1662,43 @@ export struct MeowpuutKeyboard {
     // Toast（摸猫提示）。
     if (Date.now() < this.toastExpires) {
       this.drawToast(ctx, region, look);
+    }
+  }
+
+  /**
+   * 【round 65 ①】把玻璃静态层渲染进离屏画布并转出 ImageBitmap。
+   * 静态层 = GlassPainter.shadow + body + pawShadows + 节日右端饰簇：
+   * 全部只依赖 (region 几何, Look, 猫座位几何, 节日贴图)，与动画/候选内容无关。
+   * 失败（异常/位图不可得）返回 null，调用方回退直绘路径。
+   */
+  private renderGlassCache(w: number, h: number, region: CandidateRegionLayout, look: Look,
+    showCats: boolean, festival: FestivalTheme | null): ImageBitmap | null {
+    if (!(w > 1) || !(h > 1)) return null;
+    try {
+      let off = this.glassCacheCtx;
+      if (off === null || this.glassCacheW !== w || this.glassCacheH !== h) {
+        off = new OffscreenCanvasRenderingContext2D(w, h, new RenderingContextSettings(true));
+        this.glassCacheCtx = off;
+        this.glassCacheW = w;
+        this.glassCacheH = h;
+      }
+      off.clearRect(0, 0, w, h);
+      GlassPainter.shadow(off, look.shape, region.glass, look.dark);
+      GlassPainter.body(off, look.shape, region.glass, look);
+      if (showCats) {
+        this.pawShadows(off, region, look, this.seats(region, look));
+      }
+      if (festival !== null) {
+        this.drawFestivalEnd(off, region, look);
+      }
+      const bmp = off.transferToImageBitmap();
+      if (bmp === null || bmp === undefined || bmp.width <= 0 || bmp.height <= 0) return null;
+      return bmp;
+    } catch (e) {
+      const err = e as BusinessError;
+      hilog.warn(0x0000, 'MeowpuutGlass',
+        `renderGlassCache failed: ${err !== undefined && err !== null ? err.message : 'unknown'}`);
+      return null;
     }
   }
 
@@ -1470,14 +1881,14 @@ export struct MeowpuutKeyboard {
   }
 
   /** 把裁剪区设为「玻璃之内」，用于前爪搭在玻璃上。 */
-  private clipInsideGlass(ctx: CanvasRenderingContext2D, look: Look,
+  private clipInsideGlass(ctx: Canvas2D, look: Look,
     region: CandidateRegionLayout): void {
     tracePath(ctx, look.shape, region.glass);
     ctx.clip();
   }
 
   /** 玻璃上每只前爪下的软阴影（对照 Android pawShadows）。 */
-  private pawShadows(ctx: CanvasRenderingContext2D, region: CandidateRegionLayout, look: Look,
+  private pawShadows(ctx: Canvas2D, region: CandidateRegionLayout, look: Look,
     seats: CatPlacement[]): void {
     ctx.save();
     this.clipInsideGlass(ctx, look, region);
@@ -1541,7 +1952,7 @@ export struct MeowpuutKeyboard {
   }
 
   /** 节日右端饰簇（对照 Android drawFestivalEnd）：玻璃上、猫与候选下。 */
-  private drawFestivalEnd(ctx: CanvasRenderingContext2D, region: CandidateRegionLayout, look: Look): void {
+  private drawFestivalEnd(ctx: Canvas2D, region: CandidateRegionLayout, look: Look): void {
     const festival = this.state.festival;
     if (festival === null || festival.right === null) return;
     const pm = this.festivalPixels.get(festival.right.image);
@@ -1855,7 +2266,9 @@ export struct MeowpuutKeyboard {
         const place = rowPlaces[c];
         if (place === undefined) continue;
         const pressed = this.touches?.isPressed(r, c) ?? false;
-        this.drawKey(ctx, key, place.frame, pressed, cursorMode, look, metrics);
+        // 【round 65 ④】鼠标 hover 的键画描边高亮（按下态优先，不叠加）。
+        const hovered = r === this.hoverRow && c === this.hoverCol;
+        this.drawKey(ctx, key, place.frame, pressed, hovered, cursorMode, look, metrics);
       }
     }
 
@@ -2064,6 +2477,8 @@ export struct MeowpuutKeyboard {
       this.layoutPanel();
       this.panelLayoutToken = this.lastStateToken;
       this.panelLayoutWidth = w;
+      // 【round 65 ②】候选格排完版，虚拟节点补上面板格（读屏可逐格朗读）。
+      this.updateA11yKeyNodes();
     } else {
       // 键区可用高度（fitKeysToPanel 每帧可变）决定最大滚动，每帧照旧 clamp 一行。
       this.panelScroll = Math.max(0, Math.min(this.panelScroll, this.panelMaxScroll()));
@@ -2134,7 +2549,7 @@ export struct MeowpuutKeyboard {
   }
 
   private drawKey(ctx: CanvasRenderingContext2D, key: Key, frame: Box, pressed: boolean,
-    cursorMode: boolean, look: Look, m: KeyMetrics): void {
+    hovered: boolean, cursorMode: boolean, look: Look, m: KeyMetrics): void {
     let fillTop: string;
     let fillBottom: string;
     if (key.style === KeyStyle.UTILITY) {
@@ -2213,6 +2628,18 @@ export struct MeowpuutKeyboard {
       ctx.lineWidth = 1.2;
       roundRect(ctx, f.left + 0.6, f.top + 0.6, f.width - 1.2, f.height - 1.2,
         Math.max(1, shapeR - 0.8));
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // 【round 65 ④】鼠标 hover 高亮：accent 描边浮在键帽边缘（按下态不叠加，
+    // 与加深/微缩的按下反馈区分——对应键鼠方案的 hover「描边/亮起」）。
+    if (hovered && !pressed) {
+      ctx.save();
+      roundRect(ctx, f.left + 0.9, f.top + 0.9, f.width - 1.8, f.height - 1.8,
+        Math.max(1, shapeR - 0.9));
+      ctx.strokeStyle = withAlpha(look.accent, look.dark ? 0.8 : 0.6);
+      ctx.lineWidth = 1.8;
       ctx.stroke();
       ctx.restore();
     }

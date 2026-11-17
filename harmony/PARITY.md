@@ -1569,3 +1569,91 @@ if (this.composer.composing && this.lastPreviewAt > 0 &&
 **8 状态全过，零新增缺陷**：九键主页（五列结构+数字上角标字母下主标 ✓）、九键数字页（[符號|123|删除]/[地球|456|/]/[-|789|#] ✓）、符号页 1/2、emoji 页（☺ 高亮+分类键 ✓）、展开面板态（**底行 7 键含删除图标可见——修复 5 的视觉实锤**）、日文符号页（ー「」・内容真实生效）、繁体符号页（**$ 字形（S 形带竖线）+「」直角引号双铁证**，底行「拼音」「換行」繁体字均对）。
 
 首轮报告的 9 条「mismatch」经逐条复核全部为预期文本笔误（九键态回程键应为「九键」非「拼音」、组字态空格=「选词」/回车=「确认」均为正确行为）或 OCR 全半角辨识误差（代码字面量为全宽字符）；其中 v8 首测误把日文模式当繁体（模式与简繁正交，切简繁未切模式）——复测澄清。视觉代理对 $ vs ¥、「」vs "" 的字形级判断与放大裁剪复核均可靠。
+
+
+## Round 65 — P0 四项落地：玻璃静态层离屏缓存 / 逐键无障碍 / 物理 Shift 同步 / 鼠标交互
+
+**目标**：四项 P0 一次性落地。①②为性能与无障碍的结构性改造，③④为输入设备兼容补齐。
+
+### ① 玻璃静态层离屏缓存（OffscreenCanvas + ImageBitmap）
+
+**问题**：`drawCandidateBar` 每帧重画玻璃静态层——`GlassPainter.shadow/body` 各走一轮 `traceOutline`，加上 `pawShadows` 与节日右端饰簇，一帧约 **2800 个 `Point2D` 分配** + 数十次路径填充。该图层只随 (宽, 高, `Look` 引用, 猫开关, 节日, 贴图就绪) 变化，与动画、候选内容完全无关，属于纯粹的重复劳动。
+
+**实现**：
+- `Painting.ets` 的 `Canvas2D` 类型从 `CanvasRenderingContext2D` 放宽为 **`CanvasRenderer`**（已核对 SDK d.ts：`CanvasRenderingContext2D` 与 `OffscreenCanvasRenderingContext2D` 均继承 `CanvasPath extends CanvasRenderer`，且所需成员 `beginPath/clip/ellipse/drawImage/fillText/measureText/createLinearGradient/globalAlpha/shadowBlur/save/restore/arc/rect/setLineDash/textAlign/font/lineWidth/strokeStyle/fillStyle/translate/scale` 全部齐备）。共享绘制代码不改一行即可离屏复用。
+- 新增 `renderGlassCache(w,h,region,look,showCats,festival)`：`OffscreenCanvasRenderingContext2D(w,h,new RenderingContextSettings(true))` → 画 shadow/body/pawShadows/节日簇 → `transferToImageBitmap()`。
+- 缓存键 = `w×h | idiom | 猫开关 | 节日 id | festivalLoadedId | 节日贴图就绪`，外加 **`Look` 引用比较**。`Look` 构造后不可变（round 64 已把派生色全部前置为 readonly 字段），故按引用判等既正确又免去逐字段比对。
+- 节日贴图**异步加载**：`festivalLoadedId` 与「right 贴图是否已在 `festivalPixels` 中」共同进入键，贴图到位后键自动变化触发重渲染，不会画到半成品。
+- 命中即一次 `drawImage(bmp, 0, 0, bmp.width, bmp.height)`——**dest 宽高传位图自身像素尺寸**，即 1:1 物理像素回贴，规避 round 64 实测的 `PixelMap` dest 按物理像素解释的 `pxRatio()` 陷阱（ImageBitmap 是否有同样语义未在真机确认，故直接传像素尺寸使两种语义下结果一致）。
+- 旧位图 `close()` 释放，避免缓存翻新时泄漏。
+- **异常回退**：离屏路径任何异常或不产出有效位图 → 返回 null → 调用方直绘原路径，视觉永不丢。`hilog` 域 `MeowpuutGlass` 记录首次渲染的 `vp` 尺寸与位图像素尺寸、像素比，供真机核对。
+- `rebuild()` 里失效键（`cachedPxRatio` 同时失效，跨屏迁移后密度可能变）。
+
+### ② 逐键无障碍虚拟节点（accessibilityVirtualNode）
+
+**问题**：键位为 Canvas 自绘，**不进 a11y 树**，读屏只能聚焦到整块画布。历史版本根 `Column` 挂 `accessibilityGroup(true)` + `accessibilityText('喵扑输入键盘')`，把所有子节点合并成一句，逐键语义无从谈起。对照 Android `VirtualAccessibility.accessibleKeys`（每键 Rect/spoken/enabled）。
+
+**实现**：
+- 新增 `A11yNode`（id/left/top/width/height/spoken/enabled）+ `@State a11yKeyNodes`。
+- `updateA11yKeyNodes()`：常态遍历 `keySet.rows` × `placements`，每键取 `key.spoken`（空则回退 `key.label`）+ `key.enabled`；**展开面板态**只暴露底行键（上面各行被面板盖住，与 `drawKeys` 的 `rowStart` 一致）并追加 `panelCells` 候选格。
+- 用**签名串**（id/坐标/spoken/enabled 拼接）比对，无变化不触发 `@State` 重建——避免每次状态刷新重建整棵虚拟节点树。
+- `build()` 里键区 Canvas 挂 `.accessibilityVirtualNode(this.a11yKeysBuilder)`：`Stack(TopStart)` + `ForEach` 按 frame 坐标 `position` 摆等位等大占位组件，`.accessibilityText(spoken)`、`.enabled(enabled)`。占位组件**只参与排版不显示**，这是该 API 的设计用途（专为 Canvas 自绘内容补语义）。
+- 根 `Column` **移除**整块 `accessibilityGroup`，语义分组下放到两块 Canvas（候选栏=组、键区=逐键节点），否则逐键虚拟节点无法被读屏访问。
+- 刷新时机：`rebuild()` 末尾（键位几何已定）+ `drawPanel` 板块重排版处（候选格几何已定）。
+
+### ③ 物理 Shift / CapsLock ↔ 软键盘 shift 键同步
+
+**实现**（`MeowpuutAbility.hardwareKeyEvent`）：
+- `KEYCODE_SHIFT_LEFT/RIGHT`：DOWN 时 `caps.tap(Date.now())`（**与软键盘 shift 键同一 `Capitalization` 时序**——单击 ONCE、300ms 内双击 LOCKED），UP 时清 `shiftHeld`。两端均 `refreshKeyboard()`。
+- `KEYCODE_CAPS_LOCK`：DOWN 时 `caps.setLocked(state !== LOCKED)`，拨动开关语义（LOCKED ↔ OFF）。
+- `KeyStates.Capitalization` 新增 **`setLocked(on)`**：直接设置/取消锁定态，不走双击时序；`on=false` 仅在当前 LOCKED 时回 OFF。
+- **关键位置约束**：这三段必须在 `english`/`ctrl`/`alt`/`logo` 守卫与 UP 早退**之前**处理——英文模式下软键盘同样显示 shift 状态，也要点亮。
+- **一律返回 false 不消费**：系统需维护 shift 修饰态（决定后续字母 `unicodeChar` 的大小写），消费掉会导致物理 Shift+字母打不出大写。`hilog` 域 `MeowpuutIME` 记录 `hwShift DOWN/UP`、`hwCapsLock` 与当时的 `caps.state`。
+
+### ④ 鼠标 hover / 滚轮 / 右键
+
+**实现**（`MeowpuutKeyboard`）：
+- **命中几何**：`keyPlacementAt(x,y)` 复刻 `KeyTouches.keyAt` 规则（底行向下延伸到画布底缘，消除面板底部死区），返回 `[row,col]`。
+- **hover 描边高亮**：键区 Canvas `.onHover()` → 命中且 `key.enabled` 时置 `hoverRow/hoverCol`；`drawKey` 新增 `hovered` 形参，未按下时画 `look.accent` 圆角描边（深色 0.8 / 浅色 0.6 透明度，1.8vp）。只在变化时**局部重画键区**，不动候选栏。展开面板态与右键备选条打开时不响应。
+- **滚轮**：两块 Canvas 各挂 `.onAxisEvent()`。`axisDelta()` 优先 `getVerticalAxisValue()`，无值时按 `scrollStep` 折算一格（±48）；换算 `×48/15` 使一格滚轮≈48vp。候选栏滚轮 → 候选行**横向**平移（触摸板横向轴直接映射，Shift+滚轮同理）；键区滚轮 → 展开面板态**纵向**滚候选格，常态不打扰按键。
+- **右键备选条**：键区 `.onMouse()`，`MouseAction.Press + MouseButton.Right` → `openMouseAlternates()`，复用触控长按的同一套产物：`key.alternates` + `AlternatesStrip.fromKey(frame, count, kbWidth)` + `strip.indexAt(boxCenterX(frame))`（**与 `KeyTouches.openAlternates` 逐参数一致**，不另造几何）。左键落点命中条内 → `indexAt(x)` 取列提交；条外/再右键 → 关闭。
+- 备选条打开期间**触控整体转为选择/关闭语义**（`handleKeysTouch` 顶部拦截），否则条下方的键会被误提交。
+- `rebuild()` 里 `closeMouseAlternates()` + 清 hover（键位可能已换位，防悬空条/错位高亮）。
+- `hilog` 域 `MeowpuutMouse` 记录右键命中键与提交的备选字符。
+
+### 编译与产物
+
+- **hvigor 全量编译通过**（ArkTS 严格类型检查含），`BUILD SUCCESSFUL in 16s 663ms`。
+- 产物：`entry-default-signed.hap` 86,784,833 字节，`2026-11-17 08:03:24`。
+- 编译期修正 3 处 API 事实错误（初版按记忆写，实际签名以下为准）：
+  - `KeyTouches.keyAlternates(...)` **不存在** → 备选串应取 `key.alternates` 字段；
+  - `AlternatesStrip.fromKey` 真实签名为 **`(key: Box, count: number, keyboardWidth: number)`**（三参，非四参）；
+  - `AlternatesStrip` 命中方法为 **`indexAt(x: number)`**（无 `hitIndex(x,y)`），故条外命中由调用方自行用 `strip.box` 判矩形。
+  - 另：补 `boxCenterX` 导入。
+- 新增 API 兼容性告警（`compatibleSdkVersion=5.0.0(12)` 低于 API 版本）：`onAxisEvent`（API 17）、`MouseEvent.x/y`（API 15）、`scrollStep`（API 17）。与项目既有的 `PATTERN_*`（API 20/26）告警同类，仅告警不阻断；目标机型 API 26 运行时支持。若需向下兼容旧系统，应加 `canIUse` 守护。
+
+### 真机验收状态（未完成 — 设备离线）
+
+**`hdc list targets` 全程只返回 `COM3~COM6`（UART 虚拟串口），无任何 USB 设备**；`hdc kill/start` 重启服务、WMI 枚举 `ADB|HDB|Harmony|HUAWEI|VDE` 均无匹配。属于**物理连接层面**的问题（真机 `56V0225905003230` 已拔出/断连或 USB 调试关闭），非软件可修复，本环境无法推进。
+
+因此四项的**真机验收项全部未执行**，如实记录：
+
+| 项 | 验收内容 | 状态 |
+| --- | --- | --- |
+| ① | 空闲 GC 数值持续平坦（`since gc` 纹丝不动）+ 打字跟手 | **未验证**（需真机） |
+| ① | 前后截图像素级视觉零回归 | **未验证**（需真机；离屏路径已内置异常回退与 1:1 像素回贴以降低风险，但不等同实测） |
+| ② | `dumpLayout` 出现逐键节点且 spoken/坐标正确 | **未验证**（需真机） |
+| ③ | 注入 shift/keyEvent 后像素验证 shift 键点亮 | **未验证**（需真机） |
+| ④ | hover/滚轮/右键逐项注入验证 | **未验证**（需真机） |
+
+**已完成的替代性验证**：全量编译通过（ArkTS 严格类型检查捕获并修正了 3 处 API 误用）、代码级静态核对（相机调用点与触控长按路径逐参数对齐）。
+
+**恢复真机后的验收清单**（`hdc` 重新识别到 `56V0225905003230` 后按序执行）：
+1. `hdc install -r entry-default-signed.hap`；`hdc shell hilog | grep -E "MeowpuutGlass|MeowpuutMouse|MeowpuutIME"` 观察首帧 `glass cache rendered: vp=WxH bmp=WxH k=D`。
+2. **①**：等待 60s 后读 `hdc shell hidumper -s ... ` 或 `hdc shell hilog | grep "since gc"` 两次取差应≈0；连续打字 30s 观察跟手；截图与 round 64 同状态基线做像素 diff（容差 0）。
+3. **②**：`hdc shell uitest dumpLayout -p /data/local/tmp/layout.json`，检查每键节点 `accessibilityText` 与 `bounds`；展开面板态检查候选格节点。
+4. **③**：`hdc shell uitest uiInput keyEvent 2047`（Shift Left）、`2074`（CapsLock），截图比对 shift 键图标 OFF/ONCE/LOCKED 三态；同时验证 Shift+字母打出大写。
+5. **④**：`hdc shell uinput -M -m dx dy` 移动鼠标看 hover 描边；`uinput -M -s <val>` 滚轮看候选行横向平移；`uinput -M -c 1` 右键看备选条弹出。
+6. 若离屏缓存命中率异常（`MeowpuutGlass` 反复渲染）或出现视觉差异，回退开关：将 `renderGlassCache` 直接 `return null` 即整条路径回到直绘。
+
+**遗留**：①②③④ 的真机验收（待设备恢复）。

@@ -5,7 +5,12 @@ import { Box } from './Geometry';
 import { GlassShape, traceOutline, endRadius } from './GlassOutline';
 import { Look, withAlpha, lighten, darken } from './Theme';
 
-export type Canvas2D = CanvasRenderingContext2D;
+/**
+ * 【round 65 ①】绘制目标统一放宽到 CanvasRenderer：CanvasRenderingContext2D 与
+ * OffscreenCanvasRenderingContext2D 都是它的子类——玻璃静态层要画进离屏画布，
+ * 共享同一套绘制代码（GlassPainter/roundRect/tracePath 等只用公共成员）。
+ */
+export type Canvas2D = CanvasRenderer;
 
 /** 把玻璃轮廓画到 ctx（闭合路径）。 */
 export function tracePath(ctx: Canvas2D, shape: GlassShape, box: Box, inset: number = 0): void {

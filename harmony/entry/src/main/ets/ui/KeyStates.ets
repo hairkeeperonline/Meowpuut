@@ -51,6 +51,23 @@ export class Capitalization {
     this.declinedAutomatic = false;
   }
 
+  /**
+   * 【round 65 ③】物理 CapsLock 同步：直接设置/取消锁定态，不走双击时序。
+   * on=true → LOCKED（软键盘 shift 键显示锁定图标）；on=false 且当前 LOCKED → OFF。
+   */
+  setLocked(on: boolean): void {
+    if (on) {
+      this._state = ShiftState.LOCKED;
+      this.manual = true;
+      this.lastTap = -1;
+      this.declinedAutomatic = false;
+    } else if (this._state === ShiftState.LOCKED) {
+      this._state = ShiftState.OFF;
+      this.manual = false;
+      this.lastTap = -1;
+    }
+  }
+
   static readonly DOUBLE_TAP_MS = 300;
 }
 
