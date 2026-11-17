@@ -1681,3 +1681,16 @@ if (this.composer.composing && this.lastPreviewAt > 0 &&
 **本轮修订的构建**：`BUILD SUCCESSFUL in 17s 71ms`，产物 `entry-default-signed.hap` 86,791,884 字节 `2026-11-17 08:23:42`。
 
 **真机验收状态**：仍为**未验证**——`hdc list targets` 依旧只返回 `COM3~COM6`（UART），无 USB 设备。
+### 追加：round 65 静态审查发现并修复的三个真实缺陷（无真机条件下）
+
+设备持续离线，转入代码级审查，发现三处**若不修会在真机上表现为功能错误**的缺陷：
+
+**缺陷 A（②，坐标语义错误）**：展开面板候选格的 `cell.top` 是**内容坐标**，绘制时由 `drawPanel` 的 `ctx.translate(0, -panelScroll)` 平移到屏幕。初版虚拟节点直接用了 `cell.top`，读屏聚焦坐标会随滚动量线性偏离真实位置——滚得越多偏得越远。**修复**：节点 y 改为 `cell.top - panelScroll`（屏幕坐标），滚出可视区的格不生成节点。
+
+**缺陷 B（②，签名遗漏状态）**：`updateA11yKeyNodes` 的签名串只含 id/坐标/spoken/enabled，但滚动**不改变** `cell.top`（内容坐标不变，只有屏幕位置变）。因此滚动后签名不变 → 节点不重建 → 坐标停在旧值。**修复**：签名前置 `s{panelScroll}`，并在 `drawPanel` 中对滚动量做脏标记后触发重建（拖动、fling、滚轮三条滚动路径统一在此收敛）。
+
+**缺陷 C（④，命中几何重复实现且不正确）**：`keyPlacementAt` 初版用 `place.frame` 手工重算行区间，与 `KeyTouches.keyAt` 的真实规则不一致——① 未使用 `hitFrame`（`layoutKeyGrid` 已把底行延伸至画布底缘、并把行间 gap 均分给上下行）；② **缺少 `y >= hitFrame.bottom` 上界判断**，鼠标移到画布之外仍会命中底行，导致 hover 高亮/右键备选条在键盘外误触发。**修复**：直接复用 `KeyPlacement.hitFrame`，与触控命中**同一套几何、同一份数据**，并补齐 `x` 越界与行边缘归属（与 `keyAt` 的「首键左侧归首键、末键右侧归末键」一致）。这也顺带消除了 `columnAt` 这层多余抽象。
+
+三处均属「照记忆/直觉实现」与「源码既有约定」的偏差，正是真机才会暴露、但静态审查可以提前拦住的那类问题。**修复后 `BUILD SUCCESSFUL in 19s 975ms`。**
+
+**真机验收状态**：仍为**未验证**——`hdc list targets` 依旧只有 `COM3~COM6`（UART）。

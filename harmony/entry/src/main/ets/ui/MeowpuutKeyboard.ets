@@ -397,6 +397,8 @@ export struct MeowpuutKeyboard {
   // ------------------------------------------------------------------
   @State private a11yKeyNodes: A11yNode[] = [];
   private a11ySig: string = '';
+  /** 上次生成候选格节点时的 panelScroll（滚动变化需重建节点坐标）。 */
+  private a11yPanelScroll: number = -1;
 
   aboutToAppear(): void {
     this.touches = new KeyTouches(this.host());
@@ -1118,42 +1120,33 @@ export struct MeowpuutKeyboard {
   // ---------------------------------------------------------------- 鼠标（round 65 ④）
 
   /**
-   * 按坐标命中键（复刻 KeyTouches.keyAt 的命中规则：底行向下延伸到画布底缘，
-   * 消除面板底部死区）。返回 [row, col]，未命中返回 null。
+   * 按坐标命中键——**直接复用 KeyPlacement.hitFrame**，不另算一套几何：
+   * layoutKeyGrid 已把底行向下延伸到画布底缘、并把行间 gap 均分给上下行
+   * （见 Geometry.layoutKeyGrid 的 hitTop/hitBottom），与 KeyTouches.keyAt
+   * 的触控命中完全一致，鼠标 hover/右键因此和手指点在同一块区域上。
+   * 返回 [row, col]，未命中返回 null。
    */
   private keyPlacementAt(x: number, y: number): number[] | null {
     const keySet = this.keySet;
     if (keySet === null || keySet.rows.length === 0) return null;
-    const rows = keySet.rows.length;
-    const lastRow = rows - 1;
-    for (let r = 0; r < rows; r++) {
-      let top = Number.MAX_VALUE;
-      let bottom = -Number.MAX_VALUE;
+    if (x < 0 || x >= this.kbWidth) return null;
+    for (let r = 0; r < this.placements.length; r++) {
       const rowPlaces = this.placements[r];
-      if (rowPlaces === undefined) continue;
-      for (const place of rowPlaces) {
+      if (rowPlaces === undefined || rowPlaces.length === 0) continue;
+      const first = rowPlaces[0];
+      if (first === undefined) continue;
+      const hit = first.hitFrame;
+      if (y < hit.top || y >= hit.top + hit.height) continue;
+      for (let c = 0; c < rowPlaces.length; c++) {
+        const place = rowPlaces[c];
         if (place === undefined) continue;
-        top = Math.min(top, place.frame.top);
-        bottom = Math.max(bottom, place.frame.top + place.frame.height);
+        const f = place.hitFrame;
+        if (x >= f.left && x < f.left + f.width) return [r, c];
       }
-      if (x < 0 || x >= this.kbWidth) continue;
-      if (r === lastRow) {
-        if (y >= top) return [r, this.columnAt(rowPlaces, x)];
-        continue;
-      }
-      if (y >= top && y < bottom) return [r, this.columnAt(rowPlaces, x)];
+      // 与 keyAt 一致：行内但落在首键左侧/末键右侧时，归到边缘键。
+      return [r, x < first.hitFrame.left ? 0 : rowPlaces.length - 1];
     }
     return null;
-  }
-
-  private columnAt(rowPlaces: KeyPlacement[], x: number): number {
-    for (let c = 0; c < rowPlaces.length; c++) {
-      const place = rowPlaces[c];
-      if (place === undefined) continue;
-      const f = place.frame;
-      if (x >= f.left && x < f.left + f.width) return c;
-    }
-    return -1;
   }
 
   /** 鼠标 hover：按键描边高亮（移出/展开面板态清除）。 */
@@ -1333,12 +1326,20 @@ export struct MeowpuutKeyboard {
       }
     }
     if (expanded) {
+      // 【真机风险修正】候选格坐标是「内容坐标」，绘制时由 drawPanel 的
+      // ctx.translate(0, -panelScroll) 平移到屏幕。虚拟节点必须落在**屏幕**坐标上
+      // （与 readScreen 的 bounds 语义一致），故这里减去 panelScroll；完全滚出
+      // 可视区的格不生成节点（否则读屏会聚焦到看不见的候选）。
       for (const cell of this.panelCells) {
+        const screenTop = cell.top - this.panelScroll;
+        if (screenTop + MeowpuutKeyboard.PANEL_ROW < 0 || screenTop > this.kbHeight) continue;
         nodes.push(new A11yNode(`p${cell.index}_${Math.round(cell.left)}_${Math.round(cell.top)}`,
-          cell.left, cell.top, cell.width, MeowpuutKeyboard.PANEL_ROW, cell.shown, true));
+          cell.left, screenTop, cell.width, MeowpuutKeyboard.PANEL_ROW, cell.shown, true));
       }
     }
-    let sig = '';
+    // 签名需包含 panelScroll：展开态滚动会让候选格的屏幕 y 变化，
+    // 若只比 id/坐标以外的静态字段，滚动后节点不会重建 → 读屏坐标错位。
+    let sig = expanded ? `s${Math.round(this.panelScroll)};` : '';
     for (const n of nodes) {
       sig += `${n.id}|${Math.round(n.left)}|${Math.round(n.top)}|${Math.round(n.width)}|${n.spoken}|${n.enabled ? 1 : 0};`;
     }
@@ -2510,6 +2511,12 @@ export struct MeowpuutKeyboard {
     } else {
       // 键区可用高度（fitKeysToPanel 每帧可变）决定最大滚动，每帧照旧 clamp 一行。
       this.panelScroll = Math.max(0, Math.min(this.panelScroll, this.panelMaxScroll()));
+    }
+    // 【round 65 ②】候选格的屏幕 y 随滚动变化：滚动量变了就刷新虚拟节点，
+    // 否则读屏聚焦坐标会与实际显示位置错位（拖动/fling/滚轮三条路径统一在此收敛）。
+    if (this.panelScroll !== this.a11yPanelScroll) {
+      this.a11yPanelScroll = this.panelScroll;
+      this.updateA11yKeyNodes();
     }
     const h = total;
 
