@@ -1710,3 +1710,23 @@ if (this.composer.composing && this.lastPreviewAt > 0 &&
 **仍属静态推理，未经真机验证**：`uitest uiInput keyEvent 2047` 注入的是 DOWN+UP 成对事件，恰好是验证本修复最直接的手段；但双击时序需要两次带间隔的注入，`uitest` 的单次 keyEvent 无法控制间隔，需真机配合 `uinput` 或自定义注入脚本——这一条在验收时须单独设计。
 
 **构建**：`BUILD SUCCESSFUL in 18s 722ms`。
+### 追加：round 65 ② 可聚焦性修正 + ① 缓存键语义复核
+
+**缺陷 F（②，虚拟节点可能被读屏跳过）**：占位组件是**空 `Column`**（无子组件、无内容），默认 `accessibilityLevel` 为 `auto`，由 ArkUI 与服务商「共同判定」是否可识别——空容器很可能被判为无内容而**跳过**，导致 ② 整个方案静默失效（编译通过、运行无报错、但读屏什么都不念，这是最难发现的一类失败）。
+
+**修复**：显式声明三个属性——
+```ts
+.enabled(n.enabled)
+.accessibilityLevel('yes')
+.accessibilityGroup(true)
+.accessibilityText(n.spoken)
+```
+SDK 原文（`common.d.ts`）对 `'yes'` 的定义恰好覆盖本场景：「The component can be recognized by the accessibility service. **When the parent component enables the accessibility group, a child component set to 'yes' is not restricted by the group and can still be focused**」——即 `'yes'` 能穿透父级分组限制，这正是逐键节点需要的语义，也补上了上一轮「移除根 `accessibilityGroup`」时留下的隐患：现在即使父级重新启用分组，逐键节点依然可聚焦。
+
+**① 缓存键语义复核（补充验证）**：确认 `Look` 按引用比较是正确且不会误失效的——
+- `buildState()` 每次传入的都是同一个 `this.look` 引用（`MeowpuutAbility:1680`）；
+- `this.look` **仅在 `applyLook()` 中重建**（`MeowpuutAbility:1401`），而 `applyLook()` 只有 4 个明确调用点：初始化、偏好变更、配置变更、颜色模式变更（第 179/200/286/322 行）——**不在每帧或每次刷新路径上**。
+- 故 `this.look` 引用稳定：主题不变时缓存命中，主题一变引用即变、缓存立即失效。若 `Look` 被改为每帧 `new`，缓存会永远失效——这一点已确认不存在。
+- `idiom` 只在 `rebuild()` 更新，已纳入缓存键 ✓。
+
+**构建**：`BUILD SUCCESSFUL in 19s 389ms`。仍为静态验证，真机未验。

@@ -1049,11 +1049,20 @@ export struct MeowpuutKeyboard {
   a11yKeysBuilder() {
     Stack({ alignContent: Alignment.TopStart }) {
       ForEach(this.a11yKeyNodes, (n: A11yNode) => {
+        // 【round 65 ② 修正】空 Column 默认可能被判为「无内容、不可聚焦」而被读屏
+        // 跳过。这里显式声明为可聚焦的无障碍元素：
+        //   .accessibilityLevel('yes')  —— 声明该节点自身参与无障碍焦点遍历
+        //   .accessibilityText(spoken)  —— 读屏朗读的键名
+        //   .accessibilityGroup(true)   —— 把这个占位组件当作一个整体语义单元，
+        //                                  避免读屏把它和周围节点合并或拆分
+        // 占位组件只参与排版不显示（这是 accessibilityVirtualNode 的设计用途）。
         Column()
           .width(n.width)
           .height(n.height)
           .position({ x: n.left, y: n.top })
           .enabled(n.enabled)
+          .accessibilityLevel('yes')
+          .accessibilityGroup(true)
           .accessibilityText(n.spoken)
       }, (n: A11yNode) => n.id)
     }
